@@ -3,7 +3,6 @@ import { decrypt } from "../../utils/encryption.js";
 import { whatsappConfig } from "../config/whatsapp.config.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 
-
 interface WhatsAppApiOptions {
   phoneNumberId: string;
   accessToken: string;
@@ -32,15 +31,13 @@ export async function makeWhatsAppApiRequest({
       "Content-Type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(15000),
   });
 
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new AppError(
-      "WhatsApp API request failed",
-      response.status >= 400 && response.status < 500 ? 400 : 502,
-    );
+    throw new AppError("Unable to communicate with WhatsApp API", 502);
   }
 
   if (!data || typeof data !== "object") {
@@ -48,6 +45,18 @@ export async function makeWhatsAppApiRequest({
   }
 
   return data as WhatsAppApiResponse;
+}
+
+export async function verifyWhatsAppCredentials(
+  phoneNumberId: string,
+  accessToken: string,
+): Promise<WhatsAppApiResponse> {
+  return makeWhatsAppApiRequest({
+    phoneNumberId,
+    accessToken,
+    endpoint: "",
+    method: "GET",
+  });
 }
 
 export async function makeWorkspaceWhatsAppRequest(

@@ -20,3 +20,15 @@ export const connectWhatsAppSchema = z.object({
 });
 
 export type ConnectWhatsAppInput = z.infer<typeof connectWhatsAppSchema>;
+
+const WHATSAPP_STATUSES = ["CONNECTED", "DISCONNECTED", "PENDING", "ERROR"] as const;
+
+export const updateWhatsAppStatusSchema = z.object({
+  status: z.enum(WHATSAPP_STATUSES, {
+    error: "Invalid status value",
+  }),
+});
+
+export type UpdateWhatsAppStatusInput = z.infer<
+  typeof updateWhatsAppStatusSchema
+>;
