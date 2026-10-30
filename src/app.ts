@@ -7,6 +7,7 @@ import authRouter from "./modules/auth/auth.routes.js";
 import workspaceRouter from "./modules/workspace/workspace.routes.js";
 import { errorHandler } from "./middlewares/error-handler.js";
 import invitationRouter from "./modules/workspace/invitation/invitation.routes.js";
+import whatsappRoutes from "./modules/whatsapp/whatsapp.routes.js";
 
 const app = express();
 
@@ -31,6 +32,7 @@ app.use("/api/auth", authRouter);
 
 app.use("/api/workspaces", workspaceRouter);
 app.use("/api/invitations", invitationRouter);
+app.use("/api/whatsapp", whatsappRoutes);
 
 // Health check
 app.get("/api/health", (_req, res) => {

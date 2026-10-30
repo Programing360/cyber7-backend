@@ -26,7 +26,7 @@ export const requireWorkspaceMembership = async (
       return;
     }
 
-    const workspaceId = req.params.workspaceId;
+    const workspaceId = req.params.workspaceId as string;
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       res.status(400).json({

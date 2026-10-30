@@ -16,7 +16,7 @@ export async function createInvitationController(
 ) {
   try {
     const authReq = req as AuthenticatedRequest;
-    const workspaceId = req.params.workspaceId;
+    const workspaceId = req.params.workspaceId as string;
 
     if (!authReq.user || !workspaceId) {
       throw new AppError("Authentication and workspace are required", 401);

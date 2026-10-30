@@ -8,9 +8,18 @@ import {
 } from "./workspace.controller.js";
 import { getWorkspaceAccessController } from "./workspace-access.controller.js";
 import { requireWorkspaceMembership } from "../../middlewares/require-workspace-membership.js";
-import { listWorkspaceMembersController } from "./workspace-member.controller.js";
+import {
+  listWorkspaceMembersController,
+  removeWorkspaceMemberController,
+  updateMemberRoleController,
+  updateMemberStatusController,
+} from "./workspace-member.controller.js";
 import { createInvitationController } from "./invitation/invitation.controller.js";
 import { requireRole } from "../../middlewares/require-role.js";
+import {
+  listWorkspaceInvitationsController,
+  revokeWorkspaceInvitationController,
+} from "./invitation-management/invitation-management.controller.js";
 
 const workspaceRouter = Router();
 
@@ -28,14 +37,49 @@ workspaceRouter.get(
 workspaceRouter.get(
   "/:workspaceId/members",
   requireWorkspaceMembership,
-  listWorkspaceMembersController
+  listWorkspaceMembersController,
 );
 
 workspaceRouter.post(
   "/:workspaceId/invitations",
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN"),
-  createInvitationController
+  createInvitationController,
+);
+
+// List pending invitations
+workspaceRouter.get(
+  "/:workspaceId/invitations",
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  listWorkspaceInvitationsController,
+);
+
+// Revoke invitation
+workspaceRouter.delete(
+  "/:workspaceId/invitations/:invitationId",
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  revokeWorkspaceInvitationController,
+);
+
+workspaceRouter.patch(
+  "/:workspaceId/members/:memberId/role",
+  requireWorkspaceMembership,
+  updateMemberRoleController,
+);
+
+workspaceRouter.patch(
+  "/:workspaceId/members/:memberId/status",
+  requireWorkspaceMembership,
+  updateMemberStatusController,
+);
+
+
+workspaceRouter.delete(
+  "/:workspaceId/members/:memberId",
+  requireWorkspaceMembership,
+  removeWorkspaceMemberController,
 );
 
 export default workspaceRouter;
