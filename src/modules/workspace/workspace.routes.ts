@@ -5,6 +5,7 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import {
   createWorkspaceController,
   getMyWorkspacesController,
+  updateWorkspaceController,
 } from "./workspace.controller.js";
 import { getWorkspaceAccessController } from "./workspace-access.controller.js";
 import { requireWorkspaceMembership } from "../../middlewares/require-workspace-membership.js";
@@ -32,6 +33,13 @@ workspaceRouter.get(
   "/:workspaceId/access-check",
   requireWorkspaceMembership,
   getWorkspaceAccessController,
+);
+
+workspaceRouter.patch(
+  "/:workspaceId",
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  updateWorkspaceController,
 );
 
 workspaceRouter.get(
@@ -74,7 +82,6 @@ workspaceRouter.patch(
   requireWorkspaceMembership,
   updateMemberStatusController,
 );
-
 
 workspaceRouter.delete(
   "/:workspaceId/members/:memberId",

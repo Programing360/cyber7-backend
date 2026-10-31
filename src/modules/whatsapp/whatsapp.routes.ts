@@ -2,37 +2,63 @@ import { Router } from "express";
 
 import {
   connectWhatsAppController,
-  listWhatsAppAccountsController,
-  getWhatsAppAccountController,
   updateWhatsAppStatusController,
   disconnectWhatsAppController,
-  verifyWebhookController,
-  handleWebhookController,
   getWhatsAppAccountsController,
   getWhatsAppAccountByIdController,
+  getWhatsAppConfigStatusController,
+  sendWhatsAppMessage,
 } from "./whatsapp.controller.js";
+
+import {
+  listContactsController,
+  getContactByIdController,
+  createContactController,
+  updateContactController,
+  deleteContactController,
+  listConversationsController,
+  getConversationByIdController,
+  updateConversationStatusController,
+  listConversationMessagesController,
+} from "./whatsapp-chat.controller.js";
+
+import {
+  listTemplatesController,
+  getTemplateByIdController,
+  syncTemplatesController,
+} from "./template.controller.js";
+
 import { authenticate } from "../../middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "../../middlewares/require-workspace-membership.js";
 import { requireRole } from "../../middlewares/require-role.js";
-import { receiveWhatsAppWebhook, verifyWhatsAppWebhook } from "../controllers/whatsapp-webhook.controller.js";
+import {
+  receiveWhatsAppWebhook,
+  verifyWhatsAppWebhook,
+} from "../controllers/whatsapp-webhook.controller.js";
 
 const whatsappRoutes = Router();
 
-// ─── Webhook (public — no auth, called by Meta) ───────────────────────────────
-whatsappRoutes.get("/webhook", verifyWebhookController);
-whatsappRoutes.post("/webhook", handleWebhookController);
+// Public Webhook Routes
+whatsappRoutes.get("/webhook", verifyWhatsAppWebhook);
+whatsappRoutes.post("/webhook", receiveWhatsAppWebhook);
 
-// ─── Protected workspace-scoped routes ────────────────────────────────────────
+// Protected Account Routes
+whatsappRoutes.get(
+  "/:workspaceId/config-status",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getWhatsAppConfigStatusController,
+);
 
-// List all connected WhatsApp accounts for a workspace
 whatsappRoutes.get(
   "/:workspaceId/accounts",
   authenticate,
   requireWorkspaceMembership,
-  listWhatsAppAccountsController,
+  requireRole("OWNER", "ADMIN"),
+  getWhatsAppAccountsController,
 );
 
-// Connect (register) a new WhatsApp Business account
 whatsappRoutes.post(
   "/:workspaceId/accounts",
   authenticate,
@@ -41,40 +67,6 @@ whatsappRoutes.post(
   connectWhatsAppController,
 );
 
-// Get a single WhatsApp account
-whatsappRoutes.get(
-  "/:workspaceId/accounts/:accountId",
-  authenticate,
-  requireWorkspaceMembership,
-  getWhatsAppAccountController,
-);
-
-whatsappRoutes.get(
-  "/:workspaceId/accounts",
-  authenticate,
-  requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN"),
-  getWhatsAppAccountsController,
-);
-
-// Update the connection status of a WhatsApp account
-whatsappRoutes.patch(
-  "/:workspaceId/accounts/:accountId/status",
-  authenticate,
-  requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN"),
-  updateWhatsAppStatusController,
-);
-
-// Disconnect (delete) a WhatsApp account
-whatsappRoutes.delete(
-  "/:workspaceId/accounts/:accountId",
-  authenticate,
-  requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN"),
-  disconnectWhatsAppController,
-);
-
 whatsappRoutes.get(
   "/:workspaceId/accounts/:accountId",
   authenticate,
@@ -83,14 +75,129 @@ whatsappRoutes.get(
   getWhatsAppAccountByIdController,
 );
 
+whatsappRoutes.patch(
+  "/:workspaceId/accounts/:accountId/status",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  updateWhatsAppStatusController,
+);
+
+whatsappRoutes.delete(
+  "/:workspaceId/accounts/:accountId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  disconnectWhatsAppController,
+);
+
+// Contacts Routes
 whatsappRoutes.get(
-  "/webhook",
-  verifyWhatsAppWebhook,
+  "/:workspaceId/contacts",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  listContactsController,
 );
 
 whatsappRoutes.post(
-  "/webhook",
-  receiveWhatsAppWebhook,
+  "/:workspaceId/contacts",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  createContactController,
+);
+
+whatsappRoutes.get(
+  "/:workspaceId/contacts/:contactId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getContactByIdController,
+);
+
+whatsappRoutes.patch(
+  "/:workspaceId/contacts/:contactId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  updateContactController,
+);
+
+whatsappRoutes.delete(
+  "/:workspaceId/contacts/:contactId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  deleteContactController,
+);
+
+// Conversations Routes
+whatsappRoutes.get(
+  "/:workspaceId/conversations",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  listConversationsController,
+);
+
+whatsappRoutes.get(
+  "/:workspaceId/conversations/:conversationId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getConversationByIdController,
+);
+
+whatsappRoutes.patch(
+  "/:workspaceId/conversations/:conversationId/status",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  updateConversationStatusController,
+);
+
+// Messages History Route
+whatsappRoutes.get(
+  "/:workspaceId/conversations/:conversationId/messages",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  listConversationMessagesController,
+);
+
+// Outbound Message Route
+whatsappRoutes.post(
+  "/:workspaceId/messages",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  sendWhatsAppMessage,
+);
+
+// Template Routes
+whatsappRoutes.get(
+  "/:workspaceId/templates",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  listTemplatesController,
+);
+
+whatsappRoutes.post(
+  "/:workspaceId/templates/sync",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  syncTemplatesController,
+);
+
+whatsappRoutes.get(
+  "/:workspaceId/templates/:templateId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getTemplateByIdController,
 );
 
 export default whatsappRoutes;

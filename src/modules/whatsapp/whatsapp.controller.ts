@@ -9,12 +9,15 @@ import {
   markWebhookVerified,
   getWhatsAppAccounts,
   getWhatsAppAccountById,
+  getWhatsAppConfigStatus,
 } from "./whatsapp.service.js";
 import {
   connectWhatsAppSchema,
+  sendWhatsAppTextMessageSchema,
   updateWhatsAppStatusSchema,
 } from "./whatsapp.validation.js";
 import { AppError } from "../../utils/app-error.js";
+import { sendWhatsAppTextMessage } from "../services/whatsapp-message.service.js";
 
 // ─── POST /:workspaceId/accounts ─────────────────────────────────────────────
 
@@ -261,6 +264,79 @@ export async function getWhatsAppAccountByIdController(
       success: true,
       message: "WhatsApp account retrieved successfully",
       data: account,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function sendWhatsAppMessage(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
+
+    if (!req.user?.id) {
+      throw new AppError("Unauthorized", 401);
+    }
+
+    if (!workspaceId || typeof workspaceId !== "string") {
+      throw new AppError("Workspace ID is required", 400);
+    }
+
+    // Validate request body.
+    const validationResult = sendWhatsAppTextMessageSchema.safeParse(req.body);
+
+    if (!validationResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validationResult.error.flatten(),
+      });
+    }
+
+    const { conversationId, text } = validationResult.data;
+
+    // Send WhatsApp message.
+    const message = await sendWhatsAppTextMessage({
+      workspaceId,
+      conversationId,
+      senderId: req.user.id,
+      text,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "WhatsApp message sent successfully",
+      data: message,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ─── GET /:workspaceId/config-status ─────────────────────────────────────────
+
+export async function getWhatsAppConfigStatusController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId =
+      req.workspace?.id ?? (req.params.workspaceId as string);
+
+    if (!workspaceId || typeof workspaceId !== "string") {
+      throw new AppError("Workspace ID is required", 400);
+    }
+
+    const configStatus = await getWhatsAppConfigStatus(workspaceId);
+
+    return res.status(200).json({
+      success: true,
+      data: configStatus,
     });
   } catch (error) {
     next(error);

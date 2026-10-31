@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Workspace from "./workspace.model.js";
 import Membership from "./membership.model.js";
 import { AuthError } from "../auth/auth.service.js";
+import { AppError } from "../../utils/app-error.js";
 import type { CreateWorkspaceInput } from "./workspace.validation.js";
 
 const createSlugBase = (name: string): string => {
@@ -144,4 +145,44 @@ export const getUserWorkspaces = async (userId: string) => {
         joinedAt: membership.joinedAt,
       };
     });
+};
+
+export const updateWorkspace = async (
+  workspaceId: string,
+  updates: {
+    name?: string;
+    timezone?: string;
+    currency?: string;
+  },
+) => {
+  if (!mongoose.Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("Invalid workspace ID", 400);
+  }
+
+  const workspace = await Workspace.findById(workspaceId);
+  if (!workspace) {
+    throw new AppError("Workspace not found", 404);
+  }
+
+  if (updates.name && updates.name.trim().length >= 2) {
+    workspace.name = updates.name.trim();
+  }
+  if (updates.timezone && typeof updates.timezone === "string") {
+    workspace.timezone = updates.timezone.trim();
+  }
+  if (updates.currency && typeof updates.currency === "string") {
+    workspace.currency = updates.currency.trim().toUpperCase();
+  }
+
+  await workspace.save();
+
+  return {
+    id: workspace._id.toString(),
+    name: workspace.name,
+    slug: workspace.slug,
+    ownerId: workspace.ownerId.toString(),
+    status: workspace.status,
+    timezone: workspace.timezone,
+    currency: workspace.currency,
+  };
 };

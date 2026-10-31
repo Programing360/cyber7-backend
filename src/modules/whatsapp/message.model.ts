@@ -25,7 +25,6 @@ export interface IWhatsAppMessage extends Document {
   conversationId: mongoose.Types.ObjectId;
   contactId: mongoose.Types.ObjectId;
   whatsappAccountId: mongoose.Types.ObjectId;
-
   waMessageId?: string;
   direction: WhatsAppMessageDirection;
   type: WhatsAppMessageType;
@@ -42,6 +41,7 @@ export interface IWhatsAppMessage extends Document {
 
   createdAt: Date;
   updatedAt: Date;
+  statusUpdatedAt?: Date;
 }
 
 const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
@@ -103,7 +103,10 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
       enum: ["RECEIVED", "SENT", "DELIVERED", "READ", "FAILED"],
       required: true,
     },
-
+    statusUpdatedAt: {
+      type: Date,
+      default: undefined,
+    },
     text: {
       type: String,
     },

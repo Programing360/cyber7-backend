@@ -1,10 +1,15 @@
 import type { Response, NextFunction } from "express";
 
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 
 import { createWorkspaceSchema } from "./workspace.validation.js";
 
-import { createWorkspace, getUserWorkspaces } from "./workspace.service.js";
+import {
+  createWorkspace,
+  getUserWorkspaces,
+  updateWorkspace,
+} from "./workspace.service.js";
 
 export const createWorkspaceController = async (
   req: AuthenticatedRequest,
@@ -69,6 +74,31 @@ export const getMyWorkspacesController = async (
       success: true,
       message: "Workspaces retrieved successfully",
       data: { workspaces },
+    });
+  } catch (error: unknown) {
+    next(error);
+  }
+};
+
+export const updateWorkspaceController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = (req.workspace?.id ?? req.params.workspaceId) as string;
+    const { name, timezone, currency } = req.body;
+
+    const workspace = await updateWorkspace(workspaceId, {
+      name,
+      timezone,
+      currency,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Workspace updated successfully",
+      data: { workspace },
     });
   } catch (error: unknown) {
     next(error);
