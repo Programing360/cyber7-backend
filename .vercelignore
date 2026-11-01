@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+tests/
+scripts/
+test-*.ts
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

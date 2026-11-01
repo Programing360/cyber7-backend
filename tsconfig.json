@@ -12,6 +12,6 @@
     "resolveJsonModule": true,
     "noEmitOnError": true
   },
-  "include": ["src/**/*.ts", "*.ts"],
+  "include": ["src/**/*.ts", "api/**/*.ts", "*.ts"],
   "exclude": ["node_modules", "dist"]
 }
