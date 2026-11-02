@@ -13,6 +13,9 @@ import campaignRoutes from "./modules/campaign/campaign.routes.js";
 
 const app = express();
 
+// Trust first proxy hop (e.g. Vercel edge / reverse proxy) for accurate client IP identification
+app.set("trust proxy", 1);
+
 app.use(helmet());
 
 app.use(
