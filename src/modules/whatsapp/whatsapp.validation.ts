@@ -10,7 +10,8 @@ export const connectWhatsAppSchema = z.object({
   businessAccountId: z
     .string()
     .trim()
-    .min(5, "Invalid WhatsApp Business Account ID"),
+    .min(5, "Invalid WhatsApp Business Account ID")
+    .regex(/^\d+$/, "WhatsApp Business Account ID must contain only digits"),
 
   phoneNumberId: z.string().trim().min(5, "Invalid Phone Number ID"),
 

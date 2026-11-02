@@ -54,6 +54,11 @@ import { resolveCampaignAudience } from "../src/modules/campaign/campaign-audien
 import { dispatchCampaignRecipient } from "../src/modules/campaign/campaign.service.js";
 import { updateWorkspaceContact } from "../src/modules/whatsapp/whatsapp-chat.service.js";
 import { receiveWhatsAppWebhook } from "../src/modules/controllers/whatsapp-webhook.controller.js";
+import { connectWhatsAppSchema } from "../src/modules/whatsapp/whatsapp.validation.js";
+import {
+  mapMetaApiError,
+  verifyPhoneNumberInWaba,
+} from "../src/modules/services/whatsapp-api.service.js";
 
 const WORKSPACE_ID = "507f1f77bcf86cd799439011";
 const OTHER_WORKSPACE_ID = "507f1f77bcf86cd799439012";
@@ -1120,5 +1125,138 @@ describe("Phase E: Webhook Reliability & Security", () => {
         return true;
       },
     );
+  });
+
+  describe("Phase F: WABA ID UX, Validation, and Meta Error Handling (Step 32B)", () => {
+    it("24. accepts valid numeric WABA ID and rejects non-numeric or too-short IDs", () => {
+      // Valid numeric WABA ID
+      const validResult = connectWhatsAppSchema.safeParse({
+        businessName: "Acme Support",
+        businessAccountId: "100234567890123",
+        phoneNumberId: "100987654321098",
+        displayPhoneNumber: "+1555123456",
+        accessToken: "EAAtest_token_min_20_chars",
+      });
+      assert.equal(validResult.success, true);
+
+      // Non-numeric WABA ID rejected
+      const nonNumericResult = connectWhatsAppSchema.safeParse({
+        businessName: "Acme Support",
+        businessAccountId: "WABA_INVALID_123",
+        phoneNumberId: "100987654321098",
+        displayPhoneNumber: "+1555123456",
+        accessToken: "EAAtest_token_min_20_chars",
+      });
+      assert.equal(nonNumericResult.success, false);
+      assert.match(
+        nonNumericResult.error!.issues[0]!.message,
+        /must contain only digits/i,
+      );
+
+      // Too-short WABA ID rejected (fewer than 5 characters)
+      const tooShortResult = connectWhatsAppSchema.safeParse({
+        businessName: "Acme Support",
+        businessAccountId: "1234",
+        phoneNumberId: "100987654321098",
+        displayPhoneNumber: "+1555123456",
+        accessToken: "EAAtest_token_min_20_chars",
+      });
+      assert.equal(tooShortResult.success, false);
+      assert.match(
+        tooShortResult.error!.issues[0]!.message,
+        /invalid whatsapp business account id/i,
+      );
+    });
+
+    it("25. correctly maps Meta code 100 / subcode 33 to HTTP 400 instead of HTTP 403", () => {
+      const err = mapMetaApiError(400, {
+        message:
+          "Unsupported get request. Object with ID '100234567890123' does not exist, cannot be loaded due to missing permissions, or does not support this operation.",
+        type: "GraphMethodException",
+        code: 100,
+        error_subcode: 33,
+        fbtrace_id: "AtUo7iYBCkjP41knphkBTWt",
+      });
+
+      assert.equal(err.statusCode, 400);
+      assert.notEqual(err.statusCode, 403);
+      assert.match(err.message, /invalid|configuration|identifier/i);
+    });
+
+    it("26. preserves genuine permission errors as HTTP 403", () => {
+      // Code 200: permission disallowed
+      const err200 = mapMetaApiError(403, {
+        message: "(#200) Provide valid permissions to access this edge",
+        code: 200,
+      });
+      assert.equal(err200.statusCode, 403);
+      assert.match(err200.message, /required permissions/i);
+
+      // Code 10: application permission denied
+      const err10 = mapMetaApiError(403, {
+        message: "(#10) Application does not have permission for this action",
+        code: 10,
+      });
+      assert.equal(err10.statusCode, 403);
+      assert.match(err10.message, /required permissions/i);
+
+      // Generic permission keyword when code is not 100
+      const errMsg = mapMetaApiError(403, {
+        message: "User permission was revoked by administrator",
+      });
+      assert.equal(errMsg.statusCode, 403);
+      assert.match(errMsg.message, /required permissions/i);
+    });
+
+    it("27. preserves invalid or expired token error classification as HTTP 401", () => {
+      // Expired token (code 190, subcode 463)
+      const expiredErr = mapMetaApiError(401, {
+        message: "Error validating access token: Session has expired",
+        code: 190,
+        error_subcode: 463,
+      });
+      assert.equal(expiredErr.statusCode, 401);
+      assert.match(expiredErr.message, /expired/i);
+
+      // Invalid token (code 190)
+      const invalidErr = mapMetaApiError(401, {
+        message: "Invalid OAuth access token signature",
+        code: 190,
+      });
+      assert.equal(invalidErr.statusCode, 401);
+      assert.match(invalidErr.message, /invalid/i);
+    });
+
+    it("28. preserves WABA-to-phone-number association verification", async () => {
+      // Mock Meta API response returning registered phone numbers under the WABA
+      mock.method(
+        global,
+        "fetch",
+        async () =>
+          new Response(
+            JSON.stringify({
+              data: [{ id: "100987654321098" }, { id: "999999999999999" }],
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+      );
+
+      const belongs = await verifyPhoneNumberInWaba(
+        "100234567890123",
+        "100987654321098",
+        "valid_test_token_1234567890",
+      );
+      assert.equal(belongs, true);
+
+      const doesNotBelong = await verifyPhoneNumberInWaba(
+        "100234567890123",
+        "555555555555555",
+        "valid_test_token_1234567890",
+      );
+      assert.equal(doesNotBelong, false);
+    });
   });
 });

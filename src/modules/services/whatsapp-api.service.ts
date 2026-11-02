@@ -79,39 +79,12 @@ export function mapMetaApiError(
     );
   }
 
-  // 3. Insufficient permissions (code 10, 200, or permission subcodes)
-  if (
-    code === 10 ||
-    code === 200 ||
-    msg.includes("permission") ||
-    msg.includes("privilege")
-  ) {
-    return new AppError(
-      "WhatsApp access token does not have the required permissions for this action.",
-      403,
-    );
-  }
-
-  // 4. Rate limit (codes 4, 17, 32, 613, 80004)
-  if (
-    code === 4 ||
-    code === 17 ||
-    code === 32 ||
-    code === 613 ||
-    code === 80004 ||
-    msg.includes("rate limit") ||
-    status === 429
-  ) {
-    return new AppError(
-      "WhatsApp API rate limit exceeded. Please try again later.",
-      429,
-    );
-  }
-
-  // 5. Unsupported / Non-existent node (code 100, 80007, or object does not exist)
+  // 3. Specific Meta code 100 node/object errors and non-existent nodes
+  // Evaluated BEFORE generic permission checks because Meta returns:
+  // "Unsupported get request. Object with ID '...' does not exist, cannot be loaded due to missing permissions, or does not support this operation."
+  // which contains the word "permission" despite being an HTTP 400 node lookup error.
   if (
     code === 100 ||
-    code === 80007 ||
     msg.includes("does not exist") ||
     msg.includes("cannot be loaded") ||
     msg.includes("unsupported")
@@ -125,6 +98,36 @@ export function mapMetaApiError(
     return new AppError(
       "Invalid WhatsApp Phone Number ID or identifier. Please verify your configuration in Meta Developer Console.",
       400,
+    );
+  }
+
+  // 4. Insufficient permissions (code 10, 200, or genuine permission subcodes/messages)
+  if (
+    code === 10 ||
+    code === 200 ||
+    msg.includes("permission") ||
+    msg.includes("privilege")
+  ) {
+    return new AppError(
+      "WhatsApp access token does not have the required permissions for this action.",
+      403,
+    );
+  }
+
+  // 5. Rate limit (codes 4, 17, 32, 613, 80004, 80007)
+  if (
+    code === 4 ||
+    code === 17 ||
+    code === 32 ||
+    code === 613 ||
+    code === 80004 ||
+    code === 80007 ||
+    msg.includes("rate limit") ||
+    status === 429
+  ) {
+    return new AppError(
+      "WhatsApp API rate limit exceeded. Please try again later.",
+      429,
     );
   }
 
