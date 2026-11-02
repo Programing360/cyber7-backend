@@ -9,6 +9,7 @@ export interface IWhatsAppConversation extends Document {
   status: ConversationStatus;
   assignedTo?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
+  lastCustomerMessageAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,6 +49,10 @@ const conversationSchema = new Schema<IWhatsAppConversation>(
     lastMessageAt: {
       type: Date,
     },
+
+    lastCustomerMessageAt: {
+      type: Date,
+    },
   },
   {
     timestamps: true,
@@ -71,6 +76,39 @@ conversationSchema.index({
   status: 1,
   lastMessageAt: -1,
 });
+
+export const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export function isCustomerServiceWindowOpen(
+  lastCustomerMessageAt?: Date | string | null,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!lastCustomerMessageAt) return false;
+  const time = new Date(lastCustomerMessageAt).getTime();
+  if (Number.isNaN(time)) return false;
+
+  // Reject future timestamps that exceed acceptable clock skew (60s)
+  if (time > nowMs + 60 * 1000) {
+    return false;
+  }
+
+  // Clamp minor future drift to nowMs, then calculate elapsed time
+  const effectiveTime = Math.min(time, nowMs);
+  const elapsed = nowMs - effectiveTime;
+  return elapsed >= 0 && elapsed <= CUSTOMER_SERVICE_WINDOW_MS;
+}
+
+export function getCustomerServiceWindowExpiry(
+  lastCustomerMessageAt?: Date | string | null,
+  nowMs: number = Date.now(),
+): Date | null {
+  if (!lastCustomerMessageAt) return null;
+  const time = new Date(lastCustomerMessageAt).getTime();
+  if (Number.isNaN(time)) return null;
+  if (time > nowMs + 60 * 1000) return null;
+  const effectiveTime = Math.min(time, nowMs);
+  return new Date(effectiveTime + CUSTOMER_SERVICE_WINDOW_MS);
+}
 
 const WhatsAppConversation: Model<IWhatsAppConversation> =
   mongoose.models.WhatsAppConversation ||

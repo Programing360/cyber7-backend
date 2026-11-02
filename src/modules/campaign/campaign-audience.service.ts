@@ -8,6 +8,7 @@ interface ContactRow {
   _id: Types.ObjectId;
   phoneNumber: string;
   waId: string;
+  isOptedOut?: boolean;
 }
 
 export interface ResolvedCampaignRecipient {
@@ -104,10 +105,13 @@ export async function resolveCampaignAudience({
     const contacts = await WhatsAppContact.find({
       workspaceId: workspaceObjectId,
     })
-      .select("_id phoneNumber waId")
+      .select("_id phoneNumber waId isOptedOut")
       .lean<ContactRow[]>();
 
-    const { recipients, excluded, duplicates } = buildRecipients(contacts);
+    const nonOptedOutContacts = contacts.filter((c) => !c.isOptedOut);
+    const optedOutCount = contacts.length - nonOptedOutContacts.length;
+
+    const { recipients, excluded, duplicates } = buildRecipients(nonOptedOutContacts);
 
     return {
       audience: {
@@ -118,7 +122,7 @@ export async function resolveCampaignAudience({
       summary: {
         requested: contacts.length,
         eligible: recipients.length,
-        excluded,
+        excluded: excluded + optedOutCount,
         duplicates,
       },
     };
@@ -137,7 +141,7 @@ export async function resolveCampaignAudience({
     workspaceId: workspaceObjectId,
     _id: { $in: uniqueRequestedIds.map((id) => new Types.ObjectId(id)) },
   })
-    .select("_id phoneNumber waId")
+    .select("_id phoneNumber waId isOptedOut")
     .lean<ContactRow[]>();
 
   const foundIds = new Set(contacts.map((contact) => contact._id.toString()));
@@ -150,7 +154,10 @@ export async function resolveCampaignAudience({
     );
   }
 
-  const { recipients, excluded, duplicates } = buildRecipients(contacts);
+  const eligibleContacts = contacts.filter((c) => !c.isOptedOut);
+  const optedOutCount = contacts.length - eligibleContacts.length;
+
+  const { recipients, excluded, duplicates } = buildRecipients(eligibleContacts);
 
   return {
     audience: {
@@ -161,7 +168,7 @@ export async function resolveCampaignAudience({
     summary: {
       requested: contactIds.length,
       eligible: recipients.length,
-      excluded,
+      excluded: excluded + optedOutCount,
       duplicates: duplicates + duplicatedRequestIds,
     },
   };

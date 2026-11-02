@@ -5,10 +5,12 @@ import { AppError } from "../utils/app-error.js";
 export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   let statusCode = 500;
   let message = "Internal server error";
+  let code: string | undefined;
 
   if (error instanceof AppError) {
     statusCode = error.statusCode;
     message = error.message;
+    code = error.code;
   } else if (error instanceof mongoose.Error.ValidationError) {
     statusCode = 400;
     message = "Validation failed";
@@ -32,6 +34,7 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   res.status(statusCode).json({
     success: false,
     message,
+    ...(code && { code }),
     ...(process.env.NODE_ENV !== "production" &&
       error instanceof Error && {
         debug: {

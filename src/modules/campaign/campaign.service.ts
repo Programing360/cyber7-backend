@@ -3,6 +3,7 @@ import { Types, type QueryFilter } from "mongoose";
 import { AppError } from "../../utils/app-error.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import WhatsAppTemplate from "../whatsapp/template.model.js";
+import WhatsAppContact from "../whatsapp/contact.model.js";
 import Campaign, {
   type CampaignStatus,
   type ICampaign,
@@ -812,5 +813,93 @@ export async function getCampaignRecipients({
       total,
       totalPages: Math.ceil(total / query.limit) || 1,
     },
+  };
+}
+
+export interface DispatchCampaignRecipientParams {
+  workspaceId: string;
+  campaignId: string;
+  recipientId: string;
+}
+
+/**
+ * Dispatch guard for an individual campaign recipient.
+ * Rechecks the recipient's current contact opt-out status immediately before dispatch.
+ * Excludes opted-out recipients safely, marks status FAILED with CONTACT_OPTED_OUT,
+ * and increments the campaign failedCount summary consistently.
+ */
+export async function dispatchCampaignRecipient({
+  workspaceId,
+  campaignId,
+  recipientId,
+}: DispatchCampaignRecipientParams) {
+  const workspaceObjectId = requireObjectId(
+    workspaceId,
+    "A valid workspace ID is required",
+  );
+  const campaignObjectId = requireObjectId(
+    campaignId,
+    "A valid campaign ID is required",
+  );
+  const recipientObjectId = requireObjectId(
+    recipientId,
+    "A valid recipient ID is required",
+  );
+
+  const recipient = await CampaignRecipient.findOne({
+    _id: recipientObjectId,
+    workspaceId: workspaceObjectId,
+    campaignId: campaignObjectId,
+  });
+
+  if (!recipient) {
+    throw new AppError("Campaign recipient not found", 404);
+  }
+
+  // Re-check recipient contact opt-out status scoped to workspace
+  const contact = await WhatsAppContact.findOne({
+    _id: recipient.contactId,
+    workspaceId: workspaceObjectId,
+  });
+
+  if (!contact || contact.isOptedOut) {
+    const previousStatus = recipient.status;
+    recipient.status = "FAILED";
+    recipient.errorCode = "CONTACT_OPTED_OUT";
+    recipient.errorMessage =
+      "Cannot send message: Contact has opted out of WhatsApp communications";
+    recipient.failedAt = new Date();
+    await recipient.save();
+
+    if (previousStatus !== "FAILED") {
+      await Campaign.findByIdAndUpdate(campaignObjectId, {
+        $inc: { failedCount: 1 },
+      });
+    }
+
+    return {
+      success: false,
+      skipped: true,
+      reason: "CONTACT_OPTED_OUT",
+      recipient: serializeCampaignRecipient(recipient),
+    };
+  }
+
+  // Ensure retries cannot bypass the opt-out check
+  if (
+    recipient.status === "FAILED" &&
+    recipient.errorCode === "CONTACT_OPTED_OUT"
+  ) {
+    return {
+      success: false,
+      skipped: true,
+      reason: "CONTACT_OPTED_OUT",
+      recipient: serializeCampaignRecipient(recipient),
+    };
+  }
+
+  return {
+    success: true,
+    recipient: serializeCampaignRecipient(recipient),
   };
 }

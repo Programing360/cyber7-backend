@@ -1,13 +1,21 @@
+import { Types } from "mongoose";
 import { AppError } from "../../utils/app-error.js";
 import WhatsAppContact from "../whatsapp/contact.model.js";
-import WhatsAppConversation from "../whatsapp/conversation.model.js";
+import WhatsAppConversation, {
+  CUSTOMER_SERVICE_WINDOW_MS,
+  getCustomerServiceWindowExpiry,
+  isCustomerServiceWindowOpen,
+} from "../whatsapp/conversation.model.js";
 import WhatsAppMessage, {
   WhatsAppMessageStatus,
   WhatsAppMessageType,
 } from "../whatsapp/message.model.js";
+import WhatsAppTemplate from "../whatsapp/template.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import Workspace from "../workspace/workspace.model.js";
 import { makeWorkspaceWhatsAppRequest } from "./whatsapp-api.service.js";
+
+export { CUSTOMER_SERVICE_WINDOW_MS, isCustomerServiceWindowOpen, getCustomerServiceWindowExpiry };
 
 export const STATUS_RANK: Record<WhatsAppMessageStatus, number> = {
   RECEIVED: 0,
@@ -80,17 +88,55 @@ export async function processIncomingWhatsAppMessage({
     };
   }
 
-  // 3. Find or create contact
+  // Parse incoming timestamp safely and clamp future timestamps to prevent window extension
+  const parsedSeconds = Number(message.timestamp);
+  const now = Date.now();
+  const rawMs =
+    !Number.isNaN(parsedSeconds) && parsedSeconds > 0
+      ? parsedSeconds * 1000
+      : now;
+  const incomingDate = new Date(Math.min(rawMs, now));
+
+  // Determine opt-out / opt-in keywords with punctuation and whitespace normalization
+  const rawText = (message.text || "").trim();
+  // Strip trailing punctuation common in mobile messaging (. , ! ? ; : and Bengali Dari ।)
+  const cleanedText = rawText.replace(/[.,!?;:\u0964]+$/, "").trim();
+  const isStopKeyword = /^(stop|unsubscribe|cancel|optout|opt-out|quit)$/i.test(cleanedText);
+  const isStartKeyword = /^(start|unstop)$/i.test(cleanedText);
+
+  // 3. Find or create contact with opt-out / opt-in tracking
+  const contactUpdate: Record<string, unknown> = {
+    phoneNumber: message.from,
+    ...(contactName ? { profileName: contactName } : {}),
+  };
+
+  const contactSetOnInsert: Record<string, unknown> = {};
+  const contactUnset: Record<string, 1> = {};
+
+  if (isStopKeyword) {
+    contactUpdate.isOptedOut = true;
+    contactUpdate.optOutTimestamp = incomingDate;
+    contactUpdate.optOutSource = "STOP_MESSAGE";
+  } else if (isStartKeyword) {
+    // Record conversational opt-in audit trail
+    // NOTE: START/UNSTOP alone does NOT automatically grant marketing consent (isOptedOut is preserved)
+    contactUpdate.optInTimestamp = incomingDate;
+    contactUpdate.optInSource = "START_MESSAGE";
+  } else {
+    contactSetOnInsert.isOptedOut = false;
+  }
+
   const contact = await WhatsAppContact.findOneAndUpdate(
     {
       workspaceId: account.workspaceId,
       waId: message.from,
     },
     {
-      $set: {
-        phoneNumber: message.from,
-        ...(contactName ? { profileName: contactName } : {}),
-      },
+      $set: contactUpdate,
+      ...(Object.keys(contactSetOnInsert).length > 0
+        ? { $setOnInsert: contactSetOnInsert }
+        : {}),
+      ...(Object.keys(contactUnset).length > 0 ? { $unset: contactUnset } : {}),
     },
     {
       upsert: true,
@@ -99,7 +145,9 @@ export async function processIncomingWhatsAppMessage({
     },
   );
 
-  // 4. Find or create conversation
+  // 4. Find or create conversation — updating 24-hour customer service window timestamp
+  const conversationStatus = isStopKeyword ? "CLOSED" : "OPEN";
+
   const conversation = await WhatsAppConversation.findOneAndUpdate(
     {
       workspaceId: account.workspaceId,
@@ -108,8 +156,9 @@ export async function processIncomingWhatsAppMessage({
     },
     {
       $set: {
-        status: "OPEN",
-        lastMessageAt: new Date(Number(message.timestamp) * 1000),
+        status: conversationStatus,
+        lastMessageAt: incomingDate,
+        lastCustomerMessageAt: incomingDate,
       },
     },
     {
@@ -133,7 +182,7 @@ export async function processIncomingWhatsAppMessage({
       text: message.text || "",
       mediaId: message.mediaId,
       mediaMimeType: message.mediaMimeType,
-      timestamp: new Date(Number(message.timestamp) * 1000),
+      timestamp: incomingDate,
     });
 
     return {
@@ -148,7 +197,7 @@ export async function processIncomingWhatsAppMessage({
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
-      error.code === 11000
+      (error as { code: number }).code === 11000
     ) {
       const duplicateMessage = await WhatsAppMessage.findOne({
         whatsappAccountId: account._id,
@@ -217,12 +266,11 @@ export async function updateWhatsAppMessageStatus({
   }
 
   // Rule 2: Enforce status precedence. Never allow a lower-rank status to overwrite a higher-rank status
-  // e.g. READ cannot regress to DELIVERED or SENT; DELIVERED cannot regress to SENT
   if (newRank < currentRank) {
     return message;
   }
 
-  // Rule 3: If status rank is equal (e.g. repeated DELIVERED events), only update if incoming timestamp is newer or equal
+  // Rule 3: If status rank is equal, only update if incoming timestamp is newer or equal
   if (newRank === currentRank) {
     if (message.statusUpdatedAt && incomingTimestamp < message.statusUpdatedAt) {
       return message;
@@ -268,7 +316,7 @@ export async function sendWhatsAppTextMessage({
     throw new AppError("Conversation is closed", 400);
   }
 
-  // 2. Find contact.
+  // 2. Find contact and verify opt-out status.
   const contact = await WhatsAppContact.findOne({
     _id: conversation.contactId,
     workspaceId,
@@ -278,7 +326,24 @@ export async function sendWhatsAppTextMessage({
     throw new AppError("Contact not found", 404);
   }
 
-  // 3. Find connected WhatsApp account.
+  if (contact.isOptedOut) {
+    throw new AppError(
+      "This contact has opted out of WhatsApp messages.",
+      422,
+      "CONTACT_OPTED_OUT",
+    );
+  }
+
+  // 3. Server-side enforcement of 24-hour Customer Service Window
+  if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
+    throw new AppError(
+      "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
+      422,
+      "CUSTOMER_SERVICE_WINDOW_EXPIRED",
+    );
+  }
+
+  // 4. Find connected WhatsApp account.
   const account = await WhatsAppAccount.findOne({
     _id: conversation.whatsappAccountId,
     workspaceId,
@@ -289,7 +354,7 @@ export async function sendWhatsAppTextMessage({
     throw new AppError("WhatsApp account not connected", 404);
   }
 
-  // 4. Send message through Meta WhatsApp Cloud API.
+  // 5. Send message through Meta WhatsApp Cloud API.
   const apiResponse = await makeWorkspaceWhatsAppRequest(
     workspaceId,
     account.phoneNumberId,
@@ -306,7 +371,7 @@ export async function sendWhatsAppTextMessage({
     },
   );
 
-  // 5. Extract Meta message ID.
+  // 6. Extract Meta message ID.
   const messages = apiResponse.messages as
     | Array<{ id?: string }>
     | undefined;
@@ -320,9 +385,7 @@ export async function sendWhatsAppTextMessage({
     );
   }
 
-  // 6. Save outgoing message.
-  // Note: statusUpdatedAt is deliberately undefined at creation time so that Meta's
-  // first status event (sent/delivered) is not blocked by local millisecond clock skew.
+  // 7. Save outgoing message.
   const savedMessage = await WhatsAppMessage.create({
     workspaceId,
     conversationId: conversation._id,
@@ -338,8 +401,274 @@ export async function sendWhatsAppTextMessage({
     statusUpdatedAt: undefined,
   });
 
-  // 7. Update conversation activity.
+  // 8. Update conversation activity.
   conversation.lastMessageAt = savedMessage.timestamp;
+  await conversation.save();
+
+  return savedMessage;
+}
+
+export interface SendWhatsAppTemplateMessageParams {
+  workspaceId: string;
+  conversationId: string;
+  senderId: string;
+  templateId: string;
+  language?: string;
+  components?: Array<{
+    type: "header" | "body" | "button";
+    sub_type?: string;
+    index?: number;
+    parameters: Array<Record<string, unknown>>;
+  }>;
+}
+
+export async function sendWhatsAppTemplateMessage({
+  workspaceId,
+  conversationId,
+  senderId,
+  templateId,
+  language,
+  components,
+}: SendWhatsAppTemplateMessageParams) {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("A valid workspace ID is required", 400);
+  }
+  if (!Types.ObjectId.isValid(conversationId)) {
+    throw new AppError("Invalid conversation ID", 400);
+  }
+  if (!Types.ObjectId.isValid(templateId)) {
+    throw new AppError("Invalid template ID", 400);
+  }
+
+  const workspaceObjectId = new Types.ObjectId(workspaceId);
+  const conversationObjectId = new Types.ObjectId(conversationId);
+  const templateObjectId = new Types.ObjectId(templateId);
+
+  // 1. Find conversation inside workspace.
+  const conversation = await WhatsAppConversation.findOne({
+    _id: conversationObjectId,
+    workspaceId: workspaceObjectId,
+  });
+
+  if (!conversation) {
+    throw new AppError("Conversation not found", 404);
+  }
+
+  // 2. Find contact and verify opt-out status.
+  const contact = await WhatsAppContact.findOne({
+    _id: conversation.contactId,
+    workspaceId: workspaceObjectId,
+  });
+
+  if (!contact) {
+    throw new AppError("Contact not found", 404);
+  }
+
+  if (contact.isOptedOut) {
+    throw new AppError(
+      "This contact has opted out of WhatsApp messages.",
+      422,
+      "CONTACT_OPTED_OUT",
+    );
+  }
+
+  // 3. Find connected WhatsApp account.
+  const account = await WhatsAppAccount.findOne({
+    _id: conversation.whatsappAccountId,
+    workspaceId: workspaceObjectId,
+    status: "CONNECTED",
+  });
+
+  if (!account) {
+    throw new AppError("WhatsApp account not connected", 404);
+  }
+
+  // 4. Load approved template belonging to this workspace and account.
+  const template = await WhatsAppTemplate.findOne({
+    _id: templateObjectId,
+    workspaceId: workspaceObjectId,
+    whatsappAccountId: account._id,
+  });
+
+  if (!template) {
+    throw new AppError("Template not found in this workspace", 404);
+  }
+
+  if (template.status !== "APPROVED") {
+    throw new AppError(
+      `Template is not approved (status: ${template.status})`,
+      422,
+      "TEMPLATE_NOT_APPROVED",
+    );
+  }
+
+  // 5. Validate required template variables and components
+  type TemplateComponentItem = NonNullable<SendWhatsAppTemplateMessageParams["components"]>[number];
+  const validatedComponents: TemplateComponentItem[] = [];
+
+  // 5a. Header validation
+  if (template.header?.format) {
+    const headerFormat = template.header.format.toUpperCase();
+    const headerComponent = components?.find((c) => c.type === "header");
+
+    if (["IMAGE", "DOCUMENT", "VIDEO"].includes(headerFormat)) {
+      const mediaTypeLower = headerFormat.toLowerCase();
+      const hasMediaParam = headerComponent?.parameters?.some(
+        (p) => p.type === mediaTypeLower && (p as Record<string, unknown>)[mediaTypeLower],
+      );
+
+      if (!headerComponent || !hasMediaParam) {
+        throw new AppError(
+          `Template requires a header media parameter of type ${mediaTypeLower}`,
+          400,
+          "MISSING_TEMPLATE_HEADER_MEDIA",
+        );
+      }
+      validatedComponents.push(headerComponent);
+    } else if (headerFormat === "TEXT" && template.header.text) {
+      const headerMatches = template.header.text.match(/\{\{\d+\}\}/g) || [];
+      if (headerMatches.length > 0) {
+        const providedParams = headerComponent?.parameters || [];
+        if (providedParams.length < headerMatches.length) {
+          throw new AppError(
+            `Template requires ${headerMatches.length} parameter(s) for header text, but only ${providedParams.length} provided`,
+            400,
+            "MISSING_TEMPLATE_HEADER_PARAMETERS",
+          );
+        }
+        validatedComponents.push(headerComponent!);
+      } else if (headerComponent) {
+        validatedComponents.push(headerComponent);
+      }
+    } else if (headerComponent) {
+      validatedComponents.push(headerComponent);
+    }
+  } else {
+    const headerComponent = components?.find((c) => c.type === "header");
+    if (headerComponent) {
+      validatedComponents.push(headerComponent);
+    }
+  }
+
+  // 5b. Body parameters validation
+  const requiredVariables = template.variables || [];
+  const bodyRegexMatches = template.body
+    ? template.body.match(/\{\{\d+\}\}/g) || []
+    : [];
+  const totalRequiredBodyParams = Math.max(
+    requiredVariables.length,
+    bodyRegexMatches.length,
+  );
+
+  const bodyComponent = components?.find((c) => c.type === "body");
+  if (totalRequiredBodyParams > 0) {
+    const providedParams = bodyComponent?.parameters || [];
+    if (providedParams.length < totalRequiredBodyParams) {
+      throw new AppError(
+        `Template requires ${totalRequiredBodyParams} parameter(s) for body, but only ${providedParams.length} provided`,
+        400,
+        "MISSING_TEMPLATE_PARAMETERS",
+      );
+    }
+    validatedComponents.push(bodyComponent!);
+  } else if (bodyComponent) {
+    validatedComponents.push(bodyComponent);
+  }
+
+  // 5c. Button parameters validation
+  const buttonComponents = components?.filter((c) => c.type === "button") || [];
+  for (const btn of buttonComponents) {
+    if (btn.index === undefined || btn.index < 0 || typeof btn.index !== "number") {
+      throw new AppError(
+        "Button component requires a non-negative index",
+        400,
+        "INVALID_TEMPLATE_BUTTON_PARAMETERS",
+      );
+    }
+    if (!btn.sub_type || !["url", "quick_reply"].includes(btn.sub_type.toLowerCase())) {
+      throw new AppError(
+        "Button component requires a valid sub_type (url or quick_reply)",
+        400,
+        "INVALID_TEMPLATE_BUTTON_PARAMETERS",
+      );
+    }
+    if (!btn.parameters || btn.parameters.length === 0) {
+      throw new AppError(
+        "Button component requires at least one parameter",
+        400,
+        "INVALID_TEMPLATE_BUTTON_PARAMETERS",
+      );
+    }
+    validatedComponents.push(btn);
+  }
+
+  // 5d. Enforce standard Meta component ordering: header, body, button
+  const orderRank: Record<string, number> = { header: 1, body: 2, button: 3 };
+  const sortedComponents = [...validatedComponents].sort(
+    (a, b) => (orderRank[a.type] || 99) - (orderRank[b.type] || 99),
+  );
+
+  // 6. Build Meta template payload.
+  const templatePayload: Record<string, unknown> = {
+    name: template.name,
+    language: { code: language || template.language },
+  };
+
+  if (sortedComponents.length > 0) {
+    templatePayload.components = sortedComponents;
+  }
+
+  const apiResponse = await makeWorkspaceWhatsAppRequest(
+    workspaceId,
+    account.phoneNumberId,
+    "messages",
+    {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: contact.waId,
+      type: "template",
+      template: templatePayload,
+    },
+  );
+
+  // 7. Extract Meta message ID.
+  const messages = apiResponse.messages as
+    | Array<{ id?: string }>
+    | undefined;
+
+  const waMessageId = messages?.[0]?.id;
+
+  if (!waMessageId) {
+    throw new AppError(
+      "WhatsApp API did not return a message ID",
+      502,
+    );
+  }
+
+  // 8. Save outgoing template message.
+  const savedMessage = await WhatsAppMessage.create({
+    workspaceId: workspaceObjectId,
+    conversationId: conversation._id,
+    contactId: contact._id,
+    whatsappAccountId: account._id,
+    waMessageId,
+    direction: "OUTBOUND",
+    type: "TEMPLATE",
+    status: "SENT",
+    text: template.body,
+    templateName: template.name,
+    templateLanguage: template.language,
+    templateComponents: components,
+    senderId: new Types.ObjectId(senderId),
+    timestamp: new Date(),
+    statusUpdatedAt: undefined,
+  });
+
+  // 9. Update conversation activity and reopen if previously closed.
+  conversation.lastMessageAt = savedMessage.timestamp;
+  if (conversation.status === "CLOSED") {
+    conversation.status = "OPEN";
+  }
   await conversation.save();
 
   return savedMessage;

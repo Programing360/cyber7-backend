@@ -5,6 +5,11 @@ export interface IWhatsAppContact extends Document {
   waId: string;
   phoneNumber: string;
   profileName?: string;
+  isOptedOut: boolean;
+  optOutTimestamp?: Date;
+  optOutSource?: "STOP_MESSAGE" | "USER_ACTION" | "API";
+  optInTimestamp?: Date;
+  optInSource?: "START_MESSAGE" | "USER_ACTION" | "API";
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,6 +38,30 @@ const whatsappContactSchema = new Schema<IWhatsAppContact>(
     profileName: {
       type: String,
       trim: true,
+    },
+
+    isOptedOut: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    optOutTimestamp: {
+      type: Date,
+    },
+
+    optOutSource: {
+      type: String,
+      enum: ["STOP_MESSAGE", "USER_ACTION", "API"],
+    },
+
+    optInTimestamp: {
+      type: Date,
+    },
+
+    optInSource: {
+      type: String,
+      enum: ["START_MESSAGE", "USER_ACTION", "API"],
     },
   },
   {

@@ -14,10 +14,14 @@ import {
 import {
   connectWhatsAppSchema,
   sendWhatsAppTextMessageSchema,
+  sendWhatsAppTemplateMessageSchema,
   updateWhatsAppStatusSchema,
 } from "./whatsapp.validation.js";
 import { AppError } from "../../utils/app-error.js";
-import { sendWhatsAppTextMessage } from "../services/whatsapp-message.service.js";
+import {
+  sendWhatsAppTextMessage,
+  sendWhatsAppTemplateMessage,
+} from "../services/whatsapp-message.service.js";
 
 // ─── POST /:workspaceId/accounts ─────────────────────────────────────────────
 
@@ -286,7 +290,36 @@ export async function sendWhatsAppMessage(
       throw new AppError("Workspace ID is required", 400);
     }
 
-    // Validate request body.
+    // If templateId is provided, route to template sending
+    if (req.body && typeof req.body === "object" && "templateId" in req.body) {
+      const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(req.body);
+      if (!templateValidation.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: templateValidation.error.flatten(),
+        });
+      }
+
+      const { conversationId, templateId, language, components } = templateValidation.data;
+
+      const message = await sendWhatsAppTemplateMessage({
+        workspaceId,
+        conversationId,
+        senderId: req.user.id,
+        templateId,
+        language,
+        components,
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "WhatsApp template message sent successfully",
+        data: message,
+      });
+    }
+
+    // Otherwise, validate free-form text request body
     const validationResult = sendWhatsAppTextMessageSchema.safeParse(req.body);
 
     if (!validationResult.success) {
@@ -299,7 +332,7 @@ export async function sendWhatsAppMessage(
 
     const { conversationId, text } = validationResult.data;
 
-    // Send WhatsApp message.
+    // Send WhatsApp text message.
     const message = await sendWhatsAppTextMessage({
       workspaceId,
       conversationId,
@@ -310,6 +343,52 @@ export async function sendWhatsAppMessage(
     return res.status(201).json({
       success: true,
       message: "WhatsApp message sent successfully",
+      data: message,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function sendWhatsAppTemplateMessageController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
+
+    if (!req.user?.id) {
+      throw new AppError("Unauthorized", 401);
+    }
+
+    if (!workspaceId || typeof workspaceId !== "string") {
+      throw new AppError("Workspace ID is required", 400);
+    }
+
+    const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(req.body);
+    if (!templateValidation.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: templateValidation.error.flatten(),
+      });
+    }
+
+    const { conversationId, templateId, language, components } = templateValidation.data;
+
+    const message = await sendWhatsAppTemplateMessage({
+      workspaceId,
+      conversationId,
+      senderId: req.user.id,
+      templateId,
+      language,
+      components,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "WhatsApp template message sent successfully",
       data: message,
     });
   } catch (error) {

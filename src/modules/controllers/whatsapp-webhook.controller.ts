@@ -292,11 +292,11 @@ export async function receiveWhatsAppWebhook(
               );
             }
           } catch (messageError) {
-            // Log but do NOT throw — process remaining messages in the batch.
             console.error(
               `[Webhook] Failed to process message ${message.id}:`,
               messageError instanceof Error ? messageError.message : messageError,
             );
+            throw messageError;
           }
         }
 
@@ -329,26 +329,28 @@ export async function receiveWhatsAppWebhook(
               errorMessage,
             });
           } catch (statusError) {
-            // Log but do NOT throw — process remaining status updates.
             console.error(
               `[Webhook] Failed to process status ${status.id}:`,
               statusError instanceof Error ? statusError.message : statusError,
             );
+            throw statusError;
           }
         }
       }
     }
 
-    // 6. Always acknowledge webhook with 200.
+    // 6. Acknowledge webhook with 200 after durable processing.
     return res.sendStatus(200);
   } catch (error) {
-    // Even on unexpected errors, return 200 to prevent Meta retry storms.
-    // The webhook has been received; processing failures are internal.
     console.error(
       "[Webhook] Unexpected processing error:",
       error instanceof Error ? error.message : error,
     );
 
-    return res.sendStatus(200);
+    // Return 500 on unexpected errors so Meta retries the webhook delivery
+    return res.status(500).json({
+      success: false,
+      message: "Webhook processing error",
+    });
   }
 }

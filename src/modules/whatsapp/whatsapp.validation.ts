@@ -81,10 +81,14 @@ export const updateContactSchema = z
       .trim()
       .max(100, "Profile name cannot exceed 100 characters")
       .optional(),
+    isOptedOut: z.boolean().optional(),
   })
   .strict()
   .refine(
-    (data) => data.phoneNumber !== undefined || data.profileName !== undefined,
+    (data) =>
+      data.phoneNumber !== undefined ||
+      data.profileName !== undefined ||
+      data.isOptedOut !== undefined,
     {
       message: "At least one field must be provided to update the contact",
     },
@@ -102,4 +106,35 @@ export const updateConversationStatusSchema = z.object({
 
 export type UpdateConversationStatusInput = z.infer<
   typeof updateConversationStatusSchema
+>;
+export const sendWhatsAppTemplateMessageSchema = z.object({
+  conversationId: z.string().regex(/^[0-9a-fA-F]{24}$/, {
+    message: "Invalid conversation ID",
+  }),
+  templateId: z.string().regex(/^[0-9a-fA-F]{24}$/, {
+    message: "Invalid template ID",
+  }),
+  language: z.string().trim().min(2).max(10).optional(),
+  components: z
+    .array(
+      z.object({
+        type: z.enum(["header", "body", "button"]),
+        sub_type: z.string().optional(),
+        index: z.number().optional(),
+        parameters: z.array(
+          z.object({
+            type: z.string(),
+            text: z.string().optional(),
+            image: z.record(z.string(), z.unknown()).optional(),
+            document: z.record(z.string(), z.unknown()).optional(),
+            video: z.record(z.string(), z.unknown()).optional(),
+          }),
+        ),
+      }),
+    )
+    .optional(),
+});
+
+export type SendWhatsAppTemplateMessageInput = z.infer<
+  typeof sendWhatsAppTemplateMessageSchema
 >;

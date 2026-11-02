@@ -34,6 +34,10 @@ export interface IWhatsAppMessage extends Document {
   mediaId?: string;
   mediaMimeType?: string;
 
+  templateName?: string;
+  templateLanguage?: string;
+  templateComponents?: unknown;
+
   senderId?: mongoose.Types.ObjectId;
   timestamp: Date;
 
@@ -117,6 +121,20 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
 
     mediaMimeType: {
       type: String,
+    },
+
+    templateName: {
+      type: String,
+      trim: true,
+    },
+
+    templateLanguage: {
+      type: String,
+      trim: true,
+    },
+
+    templateComponents: {
+      type: Schema.Types.Mixed,
     },
 
     senderId: {

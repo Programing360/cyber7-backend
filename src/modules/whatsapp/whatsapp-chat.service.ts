@@ -3,6 +3,8 @@ import { AppError } from "../../utils/app-error.js";
 import WhatsAppContact from "./contact.model.js";
 import WhatsAppConversation, {
   ConversationStatus,
+  isCustomerServiceWindowOpen,
+  getCustomerServiceWindowExpiry,
 } from "./conversation.model.js";
 import WhatsAppMessage from "./message.model.js";
 import type {
@@ -201,6 +203,19 @@ export async function updateWorkspaceContact({
     setFields.waId = waId;
   }
 
+  if (input.isOptedOut !== undefined) {
+    if (input.isOptedOut) {
+      setFields.isOptedOut = true;
+      setFields.optOutTimestamp = new Date();
+      setFields.optOutSource = "USER_ACTION";
+    } else {
+      setFields.isOptedOut = false;
+      setFields.optInTimestamp = new Date();
+      setFields.optInSource = "USER_ACTION";
+      // Preserve optOutTimestamp and optOutSource for audit trail rather than silently unsetting
+    }
+  }
+
   if (input.profileName !== undefined) {
     const profileName = input.profileName.trim();
     if (profileName) {
@@ -372,6 +387,8 @@ export async function listWorkspaceConversations({
   const enrichedConversations = conversations.map((conv) => ({
     ...conv,
     lastMessage: latestMessageMap.get(conv._id.toString()) || null,
+    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(conv.lastCustomerMessageAt),
+    customerServiceWindowExpiresAt: getCustomerServiceWindowExpiry(conv.lastCustomerMessageAt)?.toISOString() ?? null,
   }));
 
   return {
@@ -415,7 +432,11 @@ export async function getWorkspaceConversationById({
     throw new AppError("Conversation not found", 404);
   }
 
-  return conversation;
+  return {
+    ...conversation,
+    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt),
+    customerServiceWindowExpiresAt: getCustomerServiceWindowExpiry(conversation.lastCustomerMessageAt)?.toISOString() ?? null,
+  };
 }
 
 interface UpdateConversationStatusParams {

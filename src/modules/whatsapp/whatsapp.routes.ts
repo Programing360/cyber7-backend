@@ -8,6 +8,7 @@ import {
   getWhatsAppAccountByIdController,
   getWhatsAppConfigStatusController,
   sendWhatsAppMessage,
+  sendWhatsAppTemplateMessageController,
 } from "./whatsapp.controller.js";
 
 import {
@@ -173,6 +174,15 @@ whatsappRoutes.post(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   sendWhatsAppMessage,
+);
+
+// Outbound Template Message Route
+whatsappRoutes.post(
+  "/:workspaceId/messages/template",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  sendWhatsAppTemplateMessageController,
 );
 
 // Template Routes
