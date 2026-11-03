@@ -205,6 +205,28 @@ export async function verifyWhatsAppWebhook(req: Request, res: Response) {
 }
 
 
+// ---------- POST: Internal Webhook Audit Record ----------
+
+export async function recordInternalWebhookAuditController(
+  _req: Request,
+  res: Response,
+) {
+  try {
+    await recordWebhookVerificationSuccess();
+    return res.status(200).json({
+      success: true,
+      message: "Webhook verification recorded successfully",
+    });
+  } catch (error) {
+    console.error("[Internal Webhook Audit] Failed to record verification:", error);
+    return res.status(500).json({
+      success: false,
+      code: "AUDIT_PERSISTENCE_FAILED",
+      message: "Failed to persist webhook verification audit",
+    });
+  }
+}
+
 // ---------- POST: Receive WhatsApp webhook events ----------
 
 export async function receiveWhatsAppWebhook(
@@ -226,6 +248,7 @@ export async function receiveWhatsAppWebhook(
       // Return 401 for invalid signature — Meta should not retry invalid payloads.
       return res.status(401).json({
         success: false,
+        code: "INVALID_META_SIGNATURE",
         message: "Invalid webhook signature",
       });
     }

@@ -12,11 +12,11 @@ const startServer = async (): Promise<void> => {
     await connectDatabase();
 
     app.listen(PORT, () => {
-      console.log(`Cyber7 server running at http://localhost:${PORT}`);
+      console.log(`VexChat server running at http://localhost:${PORT}`);
       console.log(`Health check: http://localhost:${PORT}/api/health`);
     });
   } catch (error) {
-    console.error("Failed to start Cyber7 server:", error);
+    console.error("Failed to start VexChat server:", error);
     process.exit(1);
   }
 };

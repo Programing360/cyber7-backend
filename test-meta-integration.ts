@@ -212,7 +212,7 @@ const TEST_WABA_ID = process.env.TEST_WABA_ID?.trim();
 const TEST_ACCESS_TOKEN = process.env.TEST_ACCESS_TOKEN?.trim();
 const TEST_RECIPIENT_PHONE = process.env.TEST_RECIPIENT_PHONE?.trim();
 const TEST_BUSINESS_NAME =
-  process.env.TEST_BUSINESS_NAME?.trim() || "Cyber7 Test";
+  process.env.TEST_BUSINESS_NAME?.trim() || "VexChat Test";
 const TEST_DISPLAY_PHONE = process.env.TEST_DISPLAY_PHONE?.trim();
 
 record({
@@ -647,7 +647,7 @@ if (!TEST_RECIPIENT_PHONE) {
     type: "text",
     text: {
       preview_url: false,
-      body: `[Cyber7 Test] Phase 11B integration test at ${new Date().toISOString()}`,
+      body: `[VexChat Test] Phase 11B integration test at ${new Date().toISOString()}`,
     },
   };
 

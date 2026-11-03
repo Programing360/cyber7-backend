@@ -18,7 +18,7 @@ async function main() {
   const workspaceId = workspace._id.toString();
   console.log(`Using Workspace: ${workspace.name} (${workspaceId})`);
 
-  const businessName = process.env.TEST_BUSINESS_NAME || "Cyber7 Test";
+  const businessName = process.env.TEST_BUSINESS_NAME || "VexChat Test";
   const businessAccountId = process.env.TEST_WABA_ID;
   const phoneNumberId = process.env.TEST_PHONE_NUMBER_ID;
   const displayPhoneNumber = process.env.TEST_DISPLAY_PHONE || "+1 555-211-5241";

@@ -34,14 +34,25 @@ import { requireWorkspaceMembership } from "../../middlewares/require-workspace-
 import { requireRole } from "../../middlewares/require-role.js";
 import {
   receiveWhatsAppWebhook,
-  verifyWhatsAppWebhook,
+  recordInternalWebhookAuditController,
 } from "../controllers/whatsapp-webhook.controller.js";
+import { requireInternalIngressAuth } from "../../middlewares/internal-ingress-auth.js";
 
 const whatsappRoutes = Router();
 
-// Public Webhook Routes
-whatsappRoutes.get("/webhook", verifyWhatsAppWebhook);
-whatsappRoutes.post("/webhook", receiveWhatsAppWebhook);
+// Internal Webhook Ingress Protected Routes (Step 45A)
+// Legacy GET /api/whatsapp/webhook is intentionally removed to return 404
+whatsappRoutes.post(
+  "/webhook",
+  requireInternalIngressAuth,
+  receiveWhatsAppWebhook,
+);
+
+whatsappRoutes.post(
+  "/internal/webhook-verified",
+  requireInternalIngressAuth,
+  recordInternalWebhookAuditController,
+);
 
 // Protected Account Routes
 whatsappRoutes.get(

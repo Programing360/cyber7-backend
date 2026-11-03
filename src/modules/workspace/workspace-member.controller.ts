@@ -1,15 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
-import {
-  listWorkspaceMembers,
-  removeWorkspaceMember,
-  updateWorkspaceMemberRole,
-  updateWorkspaceMemberStatus,
-} from "./workspace-member.service.js";
+import { listWorkspaceMembers, removeWorkspaceMember, updateWorkspaceMemberRole, updateWorkspaceMemberStatus } from "./workspace-member.service.js";
 import { AppError } from "../../utils/app-error.js";
-import {
-  updateMemberRoleSchema,
-  updateMemberStatusSchema,
-} from "./workspace-member.validation.js";
+import { updateMemberRoleSchema, updateMemberStatusSchema } from "./workspace-member.validation.js";
 import { getRouteParam } from "../../utils/get-route-param.js";
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
 
@@ -68,6 +60,7 @@ export async function listWorkspaceMembersController(
   }
 }
 
+
 export async function updateMemberRoleController(
   req: AuthenticatedRequest,
   res: Response,
@@ -118,6 +111,7 @@ export async function updateMemberRoleController(
   }
 }
 
+
 export const updateMemberStatusController = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -158,6 +152,7 @@ export const updateMemberStatusController = async (
   }
 };
 
+
 export const removeWorkspaceMemberController = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -168,7 +163,10 @@ export const removeWorkspaceMemberController = async (
     const memberId = getRouteParam(req, "memberId");
 
     if (!workspaceId || !memberId) {
-      throw new AppError("Workspace ID and Member ID are required", 400);
+      throw new AppError(
+        "Workspace ID and Member ID are required",
+        400,
+      );
     }
 
     if (!req.user?.id) {

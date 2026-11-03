@@ -159,7 +159,7 @@ describe("Campaign environment validation", () => {
     const env = loadCampaignEnv({
       PORT: "5000",
       NODE_ENV: "development",
-      MONGODB_URI: "mongodb://127.0.0.1:27017/cyber7",
+      MONGODB_URI: "mongodb://127.0.0.1:27017/vexchat",
       JWT_ACCESS_SECRET: "existing-secret",
       META_APP_ID: "existing-app-id",
     });

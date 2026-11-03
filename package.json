@@ -1,5 +1,5 @@
 {
-  "name": "cyber7-backend",
+  "name": "vexchat-backend",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/phase-12a-config.test.ts tests/contact-crud.test.ts tests/campaign.test.ts tests/env-config.test.ts tests/vercel-hardening.test.ts tests/whatsapp-compliance.test.ts tests/auth-rate-limit.test.ts"
+    "test": "tsx --test tests/phase-12a-config.test.ts tests/contact-crud.test.ts tests/campaign.test.ts tests/env-config.test.ts tests/vercel-hardening.test.ts tests/whatsapp-compliance.test.ts tests/auth-rate-limit.test.ts tests/internal-webhook-security.test.ts"
   },
   "keywords": [],
   "author": "",

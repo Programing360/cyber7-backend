@@ -20,25 +20,25 @@ const payload = {
           value: {
             messaging_product: "whatsapp",
             metadata: {
-              display_phone_number: "+1 (555) 211-5241",
-              phone_number_id: "1429122933618887",
+              display_phone_number: "+880 1570-266232",
+              phone_number_id: "1157794877408926",
             },
             contacts: [
               {
                 profile: {
                   name: "Test Customer",
                 },
-                wa_id: "8801700000000",
+                wa_id: "1574720934077122",
               },
             ],
             messages: [
               {
                 from: "8801700000000",
-                id: "wamid.cyber7test001",
+                id: "wamid.vexchattest001",
                 timestamp: "1793337600",
                 type: "text",
                 text: {
-                  body: "Hello Cyber7, this is a test message.",
+                  body: "Hello VexChat, this is a test message.",
                 },
               },
             ],

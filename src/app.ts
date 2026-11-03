@@ -52,7 +52,7 @@ app.use("/api/campaigns", campaignRoutes);
 app.get("/", (_req, res) => {
   res.status(200).json({
     success: true,
-    message: "Welcome to Cyber7 API Server",
+    message: "Welcome to VexChat API Server",
     status: "Running",
   });
 });
@@ -61,7 +61,7 @@ app.get("/", (_req, res) => {
 app.get("/api/health", (_req, res) => {
   res.status(200).json({
     success: true,
-    message: "Cyber7 API is running successfully!",
+    message: "VexChat API is running successfully!",
     timestamp: new Date().toISOString(),
   });
 });
