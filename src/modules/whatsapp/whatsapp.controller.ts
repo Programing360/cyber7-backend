@@ -6,7 +6,7 @@ import {
   getWhatsAppAccount,
   updateWhatsAppAccountStatus,
   disconnectWhatsAppAccount,
-  markWebhookVerified,
+
   getWhatsAppAccounts,
   getWhatsAppAccountById,
   getWhatsAppConfigStatus,
@@ -162,7 +162,7 @@ export async function disconnectWhatsAppController(
 // ─── GET /webhook (Meta verification challenge) ───────────────────────────────
 
 export function verifyWebhookController(req: WorkspaceRequest, res: Response) {
-  const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+  const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN;
 
   const mode = req.query["hub.mode"] as string | undefined;
   const token = req.query["hub.verify_token"] as string | undefined;
@@ -213,9 +213,9 @@ export async function handleWebhookController(
         if (!phoneNumberId) continue;
 
         // Mark account as connected once we receive the first real event.
-        if (!change.value?.messages && !change.value?.statuses) {
-          await markWebhookVerified(phoneNumberId);
-        }
+        // if (!change.value?.messages && !change.value?.statuses) {
+        //   await markWebhookVerified(phoneNumberId);
+        // }
 
         // TODO: route messages / status updates to conversation handlers.
       }

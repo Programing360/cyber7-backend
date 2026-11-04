@@ -21,6 +21,7 @@ import {
   getConversationByIdController,
   updateConversationStatusController,
   listConversationMessagesController,
+  createConversationController,
 } from "./whatsapp-chat.controller.js";
 
 import {
@@ -33,6 +34,7 @@ import { authenticate } from "../../middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "../../middlewares/require-workspace-membership.js";
 import { requireRole } from "../../middlewares/require-role.js";
 import {
+  verifyWhatsAppWebhook,
   receiveWhatsAppWebhook,
   recordInternalWebhookAuditController,
 } from "../controllers/whatsapp-webhook.controller.js";
@@ -40,18 +42,21 @@ import { requireInternalIngressAuth } from "../../middlewares/internal-ingress-a
 
 const whatsappRoutes = Router();
 
-// Internal Webhook Ingress Protected Routes (Step 45A)
-// Legacy GET /api/whatsapp/webhook is intentionally removed to return 404
-whatsappRoutes.post(
-  "/webhook",
-  requireInternalIngressAuth,
-  receiveWhatsAppWebhook,
-);
+// Public Meta WhatsApp Webhook Routes
+whatsappRoutes.get("/webhook", verifyWhatsAppWebhook);
+whatsappRoutes.post("/webhook", receiveWhatsAppWebhook);
 
+// Internal Webhook Ingress Protected Routes
 whatsappRoutes.post(
   "/internal/webhook-verified",
   requireInternalIngressAuth,
   recordInternalWebhookAuditController,
+);
+
+whatsappRoutes.post(
+  "/internal/webhook",
+  requireInternalIngressAuth,
+  receiveWhatsAppWebhook,
 );
 
 // Protected Account Routes
@@ -153,6 +158,14 @@ whatsappRoutes.get(
   listConversationsController,
 );
 
+whatsappRoutes.post(
+  "/:workspaceId/conversations",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  createConversationController,
+);
+
 whatsappRoutes.get(
   "/:workspaceId/conversations/:conversationId",
   authenticate,
@@ -176,6 +189,7 @@ whatsappRoutes.get(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   listConversationMessagesController,
+  createConversationController,
 );
 
 // Outbound Message Route

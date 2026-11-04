@@ -209,11 +209,14 @@ const GRAPH_BASE_URL = `https://graph.facebook.com/${META_GRAPH_API_VERSION}`;
 // Check for optional test credentials
 const TEST_PHONE_NUMBER_ID = process.env.TEST_PHONE_NUMBER_ID?.trim();
 const TEST_WABA_ID = process.env.TEST_WABA_ID?.trim();
-const TEST_ACCESS_TOKEN = process.env.TEST_ACCESS_TOKEN?.trim();
+const META_SYSTEM_USER_ACCESS_TOKEN =
+  process.env.META_SYSTEM_USER_ACCESS_TOKEN?.trim();
 const TEST_RECIPIENT_PHONE = process.env.TEST_RECIPIENT_PHONE?.trim();
 const TEST_BUSINESS_NAME =
   process.env.TEST_BUSINESS_NAME?.trim() || "VexChat Test";
 const TEST_DISPLAY_PHONE = process.env.TEST_DISPLAY_PHONE?.trim();
+const ENABLE_TEST_MESSAGE_SEND =
+  process.env.ENABLE_TEST_MESSAGE_SEND === "true";
 
 record({
   name: "Graph API version configured",
@@ -239,22 +242,22 @@ if (criticalStop) {
 
 // Check test credentials presence
 const hasTestCredentials = Boolean(
-  TEST_PHONE_NUMBER_ID && TEST_WABA_ID && TEST_ACCESS_TOKEN,
+  TEST_PHONE_NUMBER_ID && TEST_WABA_ID && META_SYSTEM_USER_ACCESS_TOKEN,
 );
 
 record({
   name: "Test credentials configured",
   status: hasTestCredentials ? "PASS" : "WARN",
   details: hasTestCredentials
-    ? `TEST_PHONE_NUMBER_ID: set, TEST_WABA_ID: set, TEST_ACCESS_TOKEN: set (${TEST_ACCESS_TOKEN!.length} chars)`
+    ? `TEST_PHONE_NUMBER_ID: set, TEST_WABA_ID: set, META_SYSTEM_USER_ACCESS_TOKEN: set (${META_SYSTEM_USER_ACCESS_TOKEN!.length} chars)`
     : [
-        "Missing test credentials in .env. Add these for live API tests:",
-        "  TEST_PHONE_NUMBER_ID=<your phone number ID>",
-        "  TEST_WABA_ID=<your WABA ID>",
-        "  TEST_ACCESS_TOKEN=<your temporary access token>",
-        "  TEST_RECIPIENT_PHONE=<authorized test recipient number>",
-        "  TEST_DISPLAY_PHONE=<display phone number from Meta>",
-      ].join("\n     "),
+      "Missing test credentials in .env. Add these for live API tests:",
+      "  TEST_PHONE_NUMBER_ID=<your phone number ID>",
+      "  TEST_WABA_ID=<your WABA ID>",
+      "  META_SYSTEM_USER_ACCESS_TOKEN=<your System User access token>",
+      "  TEST_RECIPIENT_PHONE=<authorized test recipient number>",
+      "  TEST_DISPLAY_PHONE=<display phone number from Meta>",
+    ].join("\n     "),
 });
 
 if (!hasTestCredentials) {
@@ -277,10 +280,10 @@ if (!hasTestCredentials) {
 
 console.log("\n── Step 2: Meta API Connectivity ──\n");
 
-// Test 2.1: Graph API connectivity (can we reach the endpoint at all?)
+// Test 2.1: Graph API connectivity (querying actual WhatsApp Phone Number ID node)
 const connectivityResult = await metaGet(
-  `${GRAPH_BASE_URL}/me?fields=id`,
-  TEST_ACCESS_TOKEN!,
+  `${GRAPH_BASE_URL}/${TEST_PHONE_NUMBER_ID}?fields=id`,
+  META_SYSTEM_USER_ACCESS_TOKEN!,
 );
 
 if (connectivityResult.status === 0 || connectivityResult.status === 504) {
@@ -338,8 +341,8 @@ if (criticalStop) {
 
 // Test 2.3: Access token validity
 const tokenResult = await metaGet(
-  `${GRAPH_BASE_URL}/debug_token?input_token=${TEST_ACCESS_TOKEN!}&access_token=${META_APP_ID}|${META_APP_SECRET}`,
-  TEST_ACCESS_TOKEN!,
+  `${GRAPH_BASE_URL}/debug_token?input_token=${encodeURIComponent(META_SYSTEM_USER_ACCESS_TOKEN!)}&access_token=${encodeURIComponent(`${META_APP_ID}|${META_APP_SECRET}`)}`,
+  META_SYSTEM_USER_ACCESS_TOKEN!,
 );
 
 if (tokenResult.status === 200 && tokenResult.data) {
@@ -390,6 +393,34 @@ if (tokenResult.status === 200 && tokenResult.data) {
       metaStatusCode: tokenResult.status,
     });
   }
+
+  // Check assigned WhatsApp Business Accounts for the System User
+  const systemUserId = tokenData?.user_id as string | undefined;
+  if (isValid && systemUserId) {
+    const assignedWabasRes = await metaGet(
+      `${GRAPH_BASE_URL}/${systemUserId}/assigned_whatsapp_business_accounts`,
+      META_SYSTEM_USER_ACCESS_TOKEN!,
+    );
+    if (assignedWabasRes.status === 200 && assignedWabasRes.data) {
+      const assigned = (assignedWabasRes.data.data as Array<Record<string, unknown>>) || [];
+      if (assigned.length > 0) {
+        const assignedIds = assigned.map((a) => `${a.id} (${a.name || "N/A"})`).join(", ");
+        record({
+          name: "System User assigned WABAs",
+          status: "PASS",
+          details: `System User has ${assigned.length} assigned WABA(s): ${assignedIds}`,
+          metaStatusCode: assignedWabasRes.status,
+        });
+      } else {
+        record({
+          name: "System User assigned WABAs",
+          status: "WARN",
+          details: `System User (ID: ${systemUserId}) currently has 0 assigned WhatsApp Business Accounts. In Meta Business Suite -> Settings -> Users -> System Users -> Assign Assets -> WhatsApp Accounts -> Select WABA -> Full Control.`,
+          metaStatusCode: assignedWabasRes.status,
+        });
+      }
+    }
+  }
 } else {
   // debug_token may fail if app-level token is not supported — try alternative check
   record({
@@ -401,6 +432,7 @@ if (tokenResult.status === 200 && tokenResult.data) {
 }
 
 if (criticalStop) {
+  await runLocalTests();
   printReport();
   process.exit(1);
 }
@@ -408,7 +440,7 @@ if (criticalStop) {
 // Test 2.4: WABA ID retrieval
 const wabaResult = await metaGet(
   `${GRAPH_BASE_URL}/${TEST_WABA_ID}?fields=id,name,timezone_id,currency`,
-  TEST_ACCESS_TOKEN!,
+  META_SYSTEM_USER_ACCESS_TOKEN!,
 );
 
 let wabaVerified = false;
@@ -432,7 +464,7 @@ if (wabaResult.status === 200 && wabaResult.data) {
   // Also query phone numbers associated with this WABA to inspect what Meta has
   const wabaPhonesResult = await metaGet(
     `${GRAPH_BASE_URL}/${TEST_WABA_ID}/phone_numbers?fields=id,display_phone_number,verified_name`,
-    TEST_ACCESS_TOKEN!,
+    META_SYSTEM_USER_ACCESS_TOKEN!,
   );
   if (wabaPhonesResult.status === 200 && wabaPhonesResult.data) {
     const phones = (wabaPhonesResult.data.data as Array<Record<string, unknown>>) || [];
@@ -452,10 +484,16 @@ if (wabaResult.status === 200 && wabaResult.data) {
     });
   }
 } else {
+  const errCode = (wabaResult.errorData?.error as any)?.code;
+  const errSubcode = (wabaResult.errorData?.error as any)?.error_subcode ?? (wabaResult.errorData?.error as any)?.subcode;
+  let hint = "";
+  if (errCode === 100 && (errSubcode === 33 || errSubcode === "33")) {
+    hint = " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this WABA. In Meta Business Manager -> Users -> System Users -> Select 'cyber7wp_bot' -> Assign Assets -> WhatsApp Accounts -> Select WABA -> grant 'Full control'].";
+  }
   record({
     name: "WABA ID retrieval",
     status: "FAIL",
-    details: `Failed to retrieve WABA. ${safeMetaErrorSummary(wabaResult.errorData)}`,
+    details: `Failed to retrieve WABA. ${safeMetaErrorSummary(wabaResult.errorData)}${hint}`,
     metaStatusCode: wabaResult.status,
     stopFurther: true,
   });
@@ -464,7 +502,7 @@ if (wabaResult.status === 200 && wabaResult.data) {
 // Test 2.5: Phone Number ID retrieval
 const phoneResult = await metaGet(
   `${GRAPH_BASE_URL}/${TEST_PHONE_NUMBER_ID}?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status`,
-  TEST_ACCESS_TOKEN!,
+  META_SYSTEM_USER_ACCESS_TOKEN!,
 );
 
 let phoneVerified = false;
@@ -488,16 +526,23 @@ if (phoneResult.status === 200 && phoneResult.data) {
     stopFurther: !phoneVerified,
   });
 } else {
+  const errCode = (phoneResult.errorData?.error as any)?.code;
+  const errSubcode = (phoneResult.errorData?.error as any)?.error_subcode ?? (phoneResult.errorData?.error as any)?.subcode;
+  let hint = "";
+  if (errCode === 100 && (errSubcode === 33 || errSubcode === "33")) {
+    hint = " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this Phone Number ID or it does not exist under the assigned assets].";
+  }
   record({
     name: "Phone Number ID retrieval",
     status: "FAIL",
-    details: `Failed to retrieve Phone Number ID. ${safeMetaErrorSummary(phoneResult.errorData)}`,
+    details: `Failed to retrieve Phone Number ID. ${safeMetaErrorSummary(phoneResult.errorData)}${hint}`,
     metaStatusCode: phoneResult.status,
     stopFurther: true,
   });
 }
 
 if (criticalStop) {
+  await runLocalTests();
   printReport();
   process.exit(1);
 }
@@ -505,7 +550,7 @@ if (criticalStop) {
 // Test 2.6: Phone Number belongs to WABA (via WABA phone_numbers edge)
 const wabaPhonesCheck = await metaGet(
   `${GRAPH_BASE_URL}/${TEST_WABA_ID}/phone_numbers?fields=id`,
-  TEST_ACCESS_TOKEN!,
+  META_SYSTEM_USER_ACCESS_TOKEN!,
 );
 
 let phoneInWaba = false;
@@ -544,7 +589,7 @@ import {
 try {
   const phoneDetails = await svcVerifyPhone(
     TEST_PHONE_NUMBER_ID!,
-    TEST_ACCESS_TOKEN!,
+    META_SYSTEM_USER_ACCESS_TOKEN!,
   );
 
   record({
@@ -554,7 +599,7 @@ try {
   });
 
   // Verify WABA service
-  const wabaDetails = await svcVerifyWaba(TEST_WABA_ID!, TEST_ACCESS_TOKEN!);
+  const wabaDetails = await svcVerifyWaba(TEST_WABA_ID!, META_SYSTEM_USER_ACCESS_TOKEN!);
 
   record({
     name: "Service: verifyWhatsAppBusinessAccount()",
@@ -566,7 +611,7 @@ try {
   const isMatch = await svcVerifyPhoneInWaba(
     TEST_WABA_ID!,
     TEST_PHONE_NUMBER_ID!,
-    TEST_ACCESS_TOKEN!,
+    META_SYSTEM_USER_ACCESS_TOKEN!,
   );
 
   if (!isMatch) {
@@ -599,7 +644,7 @@ if (criticalStop) {
 
 // Test invalid credential rejection
 try {
-  await svcVerifyPhone("INVALID_PHONE_ID_999", TEST_ACCESS_TOKEN!);
+  await svcVerifyPhone("INVALID_PHONE_ID_999", META_SYSTEM_USER_ACCESS_TOKEN!);
   record({
     name: "Service: invalid Phone ID rejection",
     status: "FAIL",
@@ -627,15 +672,17 @@ record({
 
 console.log("\n── Step 4: Outbound Message Test ──\n");
 
-if (!TEST_RECIPIENT_PHONE) {
+if (!ENABLE_TEST_MESSAGE_SEND || !TEST_RECIPIENT_PHONE) {
   record({
     name: "Outbound message test",
     status: "SKIP",
-    details: [
-      "TEST_RECIPIENT_PHONE not configured in .env.",
-      "Add: TEST_RECIPIENT_PHONE=<authorized test number in international format, e.g. 8801XXXXXXXXX>",
-      "The number must be registered in your Meta WhatsApp test numbers.",
-    ].join("\n     "),
+    details: !ENABLE_TEST_MESSAGE_SEND
+      ? "ENABLE_TEST_MESSAGE_SEND is not set to 'true'. Set ENABLE_TEST_MESSAGE_SEND=true and TEST_RECIPIENT_PHONE in .env to run outbound live messaging test."
+      : [
+        "TEST_RECIPIENT_PHONE not configured in .env.",
+        "Add: TEST_RECIPIENT_PHONE=<authorized test number in international format, e.g. 8801XXXXXXXXX>",
+        "The number must be registered in your Meta WhatsApp test numbers.",
+      ].join("\n     "),
   });
 } else {
   // Send a test message directly via Meta Graph API (not through the full service layer,
@@ -653,7 +700,7 @@ if (!TEST_RECIPIENT_PHONE) {
 
   const sendResult = await metaPost(
     `${GRAPH_BASE_URL}/${TEST_PHONE_NUMBER_ID}/messages`,
-    TEST_ACCESS_TOKEN!,
+    META_SYSTEM_USER_ACCESS_TOKEN!,
     messagePayload,
   );
 
@@ -674,7 +721,7 @@ if (!TEST_RECIPIENT_PHONE) {
 
     // Verify response doesn't contain credentials
     const responseStr = JSON.stringify(sendResult.data);
-    const leaksToken = responseStr.includes(TEST_ACCESS_TOKEN!);
+    const leaksToken = responseStr.includes(META_SYSTEM_USER_ACCESS_TOKEN!);
 
     record({
       name: "Outbound response: no credential leakage",

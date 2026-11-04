@@ -11,11 +11,13 @@ import {
   getWorkspaceConversationById,
   updateWorkspaceConversationStatus,
   listWorkspaceConversationMessages,
+  createOrGetWorkspaceConversation,
 } from "./whatsapp-chat.service.js";
 import {
   createContactSchema,
   updateContactSchema,
   updateConversationStatusSchema,
+  createConversationSchema,
 } from "./whatsapp.validation.js";
 
 // Helper to parse pagination params
@@ -233,7 +235,7 @@ export async function listConversationsController(
       status,
       search,
     });
-
+// console.log(result);
     res.status(200).json({
       success: true,
       message: "Conversations retrieved successfully",
@@ -260,6 +262,8 @@ export async function getConversationByIdController(
       workspaceId,
       conversationId,
     });
+
+    console.log(conversation);
 
     res.status(200).json({
       success: true,
@@ -338,6 +342,42 @@ export async function listConversationMessagesController(
       success: true,
       message: "Messages retrieved successfully",
       data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /:workspaceId/conversations
+ */
+export async function createConversationController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = (req.workspace?.id ?? req.params.workspaceId) as string;
+
+    const parsed = createConversationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(
+        parsed.error.issues[0]?.message ?? "Invalid conversation input",
+        400,
+      );
+    }
+
+    const conversation = await createOrGetWorkspaceConversation({
+      workspaceId,
+      contactId: parsed.data.contactId,
+      phoneNumber: parsed.data.phoneNumber,
+      profileName: parsed.data.profileName,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Conversation created successfully",
+      data: conversation,
     });
   } catch (error) {
     next(error);

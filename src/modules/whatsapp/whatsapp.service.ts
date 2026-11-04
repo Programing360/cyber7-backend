@@ -14,6 +14,8 @@ import {
   verifyWhatsAppCredentials,
   verifyWhatsAppBusinessAccount,
   verifyPhoneNumberInWaba,
+  makeWhatsAppApiRequest,
+  subscribeWabaToMetaApp,
 } from "../services/whatsapp-api.service.js";
 
 // ─── Connect ─────────────────────────────────────────────────────────────────
@@ -79,6 +81,8 @@ export async function connectWhatsAppAccount({
     );
   }
 
+
+
   // Step 5: Validate display phone number matches Meta registered record
   const verifiedDisplayNumber =
     phoneDetails.displayPhoneNumber || input.displayPhoneNumber;
@@ -95,8 +99,36 @@ export async function connectWhatsAppAccount({
       400,
     );
   }
+  const subscriptionResult = await makeWhatsAppApiRequest({
+    nodeId: input.businessAccountId,
+    endpoint: "subscribed_apps",
+    method: "POST",
+    accessToken: input.accessToken,
+  });
 
-  // Step 6: Encrypt access token
+  if (subscriptionResult.success !== true) {
+    throw new AppError(
+      "Failed to subscribe WhatsApp Business Account to Meta App.",
+      502,
+    );
+  }
+
+
+  // Step 6: Subscribe WABA to Meta App
+  const isSubscribed = await subscribeWabaToMetaApp(
+    input.businessAccountId,
+    input.accessToken,
+  );
+
+  if (!isSubscribed) {
+    throw new AppError(
+      "Meta did not confirm WhatsApp Business Account subscription.",
+      502,
+    );
+  }
+
+
+  // Step 7: Encrypt access token
   const encryptedToken = encrypt(input.accessToken);
 
   try {
@@ -109,7 +141,7 @@ export async function connectWhatsAppAccount({
       accessTokenEncrypted: encryptedToken,
       status: "CONNECTED",
       connectedAt: new Date(),
-      webhookVerified: false,
+      webhookVerified: true,
     });
 
     return sanitizeAccount(account);
@@ -255,15 +287,17 @@ export async function disconnectWhatsAppAccount({
 
 // ─── Webhook verification ─────────────────────────────────────────────────────
 
-export async function markWebhookVerified(phoneNumberId: string) {
-  const account = await WhatsAppAccount.findOneAndUpdate(
-    { phoneNumberId },
-    { webhookVerified: true, status: "CONNECTED", connectedAt: new Date() },
-    { new: true },
-  );
+// export async function markWebhookVerified(phoneNumberId: string) {
+//   const account = await WhatsAppAccount.findOneAndUpdate(
+//     { phoneNumberId },
+//     { webhookVerified: true, status: "CONNECTED", connectedAt: new Date() },
+//     { new: true },
+//   );
 
-  return account ? sanitizeAccount(account) : null;
-}
+//   console.log("Marking webhook as verified for phone number:", account);
+
+//   return account ? sanitizeAccount(account) : null;
+// }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -288,7 +322,9 @@ export async function getWhatsAppAccounts(workspaceId: string) {
     ? new Types.ObjectId(workspaceId)
     : workspaceId;
 
-  const accounts = await WhatsAppAccount.find({ workspaceId: targetWorkspaceId })
+  const accounts = await WhatsAppAccount.find({
+    workspaceId: targetWorkspaceId,
+  })
     .select(
       "businessName businessAccountId phoneNumberId displayPhoneNumber status webhookVerified connectedAt createdAt updatedAt",
     )
@@ -358,15 +394,18 @@ export async function getWhatsAppConfigStatus(
 
   const targetWorkspaceId = new Types.ObjectId(workspaceId);
 
-  const [totalAccounts, connectedAccounts, webhookVerified] =
-    await Promise.all([
+  const [totalAccounts, connectedAccounts, webhookVerified] = await Promise.all(
+    [
       WhatsAppAccount.countDocuments({ workspaceId: targetWorkspaceId }),
       WhatsAppAccount.countDocuments({
         workspaceId: targetWorkspaceId,
         status: "CONNECTED",
       }),
       getPlatformWebhookVerificationStatus(),
-    ]);
+    ],
+  );
+
+  // console.log('webhookVerified', webhookVerified);
 
   return {
     metaApp: {

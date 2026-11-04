@@ -1,13 +1,10 @@
-
 import type { Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
 
 import { whatsappConfig } from "../config/whatsapp.config.js";
 import { recordWebhookVerificationSuccess } from "../whatsapp/meta-platform-config.model.js";
 
-import {
-  verifyWhatsAppWebhookSignature,
-} from "../services/whatsapp-webhook.service.js";
+import { verifyWhatsAppWebhookSignature } from "../services/whatsapp-webhook.service.js";
 
 import {
   processIncomingWhatsAppMessage,
@@ -16,7 +13,6 @@ import {
 
 import type { WhatsAppMessageType } from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
-
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -70,7 +66,11 @@ function extractTextContent(message: WebhookMessage): string | undefined {
  */
 function extractMediaId(message: WebhookMessage): string | undefined {
   const mediaPayload =
-    message.image ?? message.video ?? message.audio ?? message.document ?? message.sticker;
+    message.image ??
+    message.video ??
+    message.audio ??
+    message.document ??
+    message.sticker;
 
   return mediaPayload?.id;
 }
@@ -80,11 +80,14 @@ function extractMediaId(message: WebhookMessage): string | undefined {
  */
 function extractMediaMimeType(message: WebhookMessage): string | undefined {
   const mediaPayload =
-    message.image ?? message.video ?? message.audio ?? message.document ?? message.sticker;
+    message.image ??
+    message.video ??
+    message.audio ??
+    message.document ??
+    message.sticker;
 
   return mediaPayload?.mime_type;
 }
-
 
 // ---------- Webhook payload types ----------
 
@@ -167,13 +170,13 @@ interface WhatsAppWebhookPayload {
   }>;
 }
 
-
 function safeCompareTokens(a: string, b: string): boolean {
   if (typeof a !== "string" || typeof b !== "string") return false;
   if (!a || !b) return false;
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
   if (bufA.length !== bufB.length) return false;
+
   return timingSafeEqual(bufA, bufB);
 }
 
@@ -185,25 +188,45 @@ export async function verifyWhatsAppWebhook(req: Request, res: Response) {
   const challenge = req.query["hub.challenge"];
 
   const expectedToken = whatsappConfig.webhookVerifyToken;
+
+  console.log("[WEBHOOK TOKEN CHECK]", {
+    expectedLength: expectedToken.length,
+    receivedLength: token?.length,
+    matches: typeof token === "string" && safeCompareTokens(token, expectedToken),
+  });
+
+  console.log("[META WEBHOOK VERIFICATION]", {
+    mode,
+    hasToken: typeof token === "string",
+    hasExpectedToken: Boolean(expectedToken),
+    tokenMatches:
+      typeof token === "string" && safeCompareTokens(token, expectedToken),
+    hasChallenge: typeof challenge === "string",
+  });
+
   const isValidToken =
     typeof token === "string" && safeCompareTokens(token, expectedToken);
 
-  if (
-    mode === "subscribe" &&
-    isValidToken &&
-    typeof challenge === "string"
-  ) {
+  if (mode === "subscribe" && isValidToken && typeof challenge === "string") {
     try {
       await recordWebhookVerificationSuccess(req.ip);
     } catch (err) {
-      console.error("[Webhook Verification] Failed to persist verification record:", err);
+      console.error(
+        "[Webhook Verification] Failed to persist verification record:",
+        err,
+      );
+    }
+
+    if (typeof res.type === "function") {
+      res.type("text/plain");
+    } else if (typeof res.setHeader === "function") {
+      res.setHeader("Content-Type", "text/plain");
     }
     return res.status(200).send(challenge);
   }
 
   return res.sendStatus(403);
 }
-
 
 // ---------- POST: Internal Webhook Audit Record ----------
 
@@ -218,7 +241,10 @@ export async function recordInternalWebhookAuditController(
       message: "Webhook verification recorded successfully",
     });
   } catch (error) {
-    console.error("[Internal Webhook Audit] Failed to record verification:", error);
+    console.error(
+      "[Internal Webhook Audit] Failed to record verification:",
+      error,
+    );
     return res.status(500).json({
       success: false,
       code: "AUDIT_PERSISTENCE_FAILED",
@@ -256,7 +282,7 @@ export async function receiveWhatsAppWebhook(
     // 2. Validate webhook payload.
     const payload = req.body as WhatsAppWebhookPayload;
 
-    if (payload.object !== "whatsapp_business_account") {
+    if (!payload || payload.object !== "whatsapp_business_account") {
       // Return 200 for unrecognized objects to prevent retry storms.
       return res.sendStatus(200);
     }
@@ -317,7 +343,9 @@ export async function receiveWhatsAppWebhook(
           } catch (messageError) {
             console.error(
               `[Webhook] Failed to process message ${message.id}:`,
-              messageError instanceof Error ? messageError.message : messageError,
+              messageError instanceof Error
+                ? messageError.message
+                : messageError,
             );
             throw messageError;
           }
@@ -341,8 +369,7 @@ export async function receiveWhatsAppWebhook(
             }
 
             const errorMessage =
-              status.errors?.[0]?.message ??
-              status.errors?.[0]?.title;
+              status.errors?.[0]?.message ?? status.errors?.[0]?.title;
 
             await updateWhatsAppMessageStatus({
               whatsappAccountId: account._id.toString(),

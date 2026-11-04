@@ -3,6 +3,8 @@ import { decrypt } from "../../utils/encryption.js";
 import { whatsappConfig } from "../config/whatsapp.config.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 
+import crypto from "node:crypto";
+
 export interface WhatsAppApiOptions {
   /**
    * The Graph API node ID (e.g. Phone Number ID, WABA ID, Message ID).
@@ -48,6 +50,13 @@ interface MetaRawErrorPayload {
   fbtrace_id?: string;
 }
 
+function generateAppSecretProof(accessToken: string): string {
+  return crypto
+    .createHmac("sha256", whatsappConfig.appSecret)
+    .update(accessToken)
+    .digest("hex");
+}
+
 /**
  * Maps Meta Graph API error codes into safe, sanitized client-facing AppErrors.
  * Internal Meta details, tokens, and trace parameters are never exposed.
@@ -79,15 +88,59 @@ export function mapMetaApiError(
     );
   }
 
-  // 3. Specific Meta code 100 node/object errors and non-existent nodes
+  // 3. 24-hour Customer Service Window expired (code 131047 / subcode 2494010)
+  if (
+    code === 131047 ||
+    subcode === 2494010 ||
+    msg.includes("24 hour") ||
+    msg.includes("customer service window") ||
+    msg.includes("re-engagement")
+  ) {
+    return new AppError(
+      "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
+      422,
+      "CUSTOMER_SERVICE_WINDOW_EXPIRED",
+    );
+  }
+
+  // 4. Undeliverable / Invalid WhatsApp user (codes 131026, 131030)
+  if (
+    code === 131026 ||
+    code === 131030 ||
+    msg.includes("not a valid whatsapp") ||
+    msg.includes("undeliverable")
+  ) {
+    return new AppError(
+      "Message undeliverable. The recipient phone number is not a valid WhatsApp user or is unable to receive messages.",
+      400,
+      "RECIPIENT_UNDELIVERABLE",
+    );
+  }
+
+  // 5. Missing or invalid recipient 'to' parameter (evaluated before generic code 100)
+  if (
+    msg.includes("parameter to") ||
+    msg.includes("param to") ||
+    msg.includes("the parameter to is required") ||
+    msg.includes("recipient")
+  ) {
+    return new AppError(
+      "Invalid or missing recipient WhatsApp phone number.",
+      400,
+      "INVALID_RECIPIENT_PHONE",
+    );
+  }
+
+  // 6. Specific Meta node/object errors and non-existent nodes (code 100 or subcode 33 with object lookup failure)
   // Evaluated BEFORE generic permission checks because Meta returns:
   // "Unsupported get request. Object with ID '...' does not exist, cannot be loaded due to missing permissions, or does not support this operation."
   // which contains the word "permission" despite being an HTTP 400 node lookup error.
   if (
-    code === 100 ||
+    subcode === 33 ||
     msg.includes("does not exist") ||
     msg.includes("cannot be loaded") ||
-    msg.includes("unsupported")
+    msg.includes("unsupported get request") ||
+    msg.includes("object with id")
   ) {
     if (msg.includes("business") || msg.includes("waba")) {
       return new AppError(
@@ -97,6 +150,29 @@ export function mapMetaApiError(
     }
     return new AppError(
       "Invalid WhatsApp Phone Number ID or identifier. Please verify your configuration in Meta Developer Console.",
+      400,
+    );
+  }
+
+  // 7. Template format or parameter errors (code 100 or 132xxx)
+  if (
+    code === 132000 ||
+    code === 132001 ||
+    code === 132015 ||
+    code === 132016 ||
+    (code === 100 && (msg.includes("template") || msg.includes("component")))
+  ) {
+    return new AppError(
+      "WhatsApp template error: The specified template does not exist, is paused, or has invalid parameters.",
+      400,
+      "INVALID_TEMPLATE_PARAMETERS",
+    );
+  }
+
+  // 8. Generic Meta code 100 (Invalid parameter)
+  if (code === 100) {
+    return new AppError(
+      "Invalid request parameter sent to WhatsApp API. Please verify request data.",
       400,
     );
   }
@@ -159,7 +235,10 @@ export async function makeWhatsAppApiRequest(
   const targetNodeId = options.nodeId || options.phoneNumberId;
 
   if (!targetNodeId || !targetNodeId.trim()) {
-    throw new AppError("A valid Graph API node ID or phone number ID is required", 400);
+    throw new AppError(
+      "A valid Graph API node ID or phone number ID is required",
+      400,
+    );
   }
 
   // Clean path resolution without trailing or double slashes
@@ -169,22 +248,50 @@ export async function makeWhatsAppApiRequest(
     path = `${path}/${cleanEndpoint}`;
   }
 
-  // Append query parameters cleanly
-  if (options.queryParams && typeof options.queryParams === "object") {
-    const params = new URLSearchParams();
+  // // Append query parameters cleanly
+  // if (options.queryParams && typeof options.queryParams === "object") {
+  //   const params = new URLSearchParams();
+  //   for (const [key, val] of Object.entries(options.queryParams)) {
+  //     if (val !== undefined && val !== null) {
+  //       params.append(key, String(val));
+  //     }
+  //   }
+  //   const qs = params.toString();
+  //   if (qs) {
+  //     path = `${path}?${qs}`;
+  //   }
+  // }
+  const params = new URLSearchParams();
+  // Add existing query parameters
+  if (options.queryParams) {
     for (const [key, val] of Object.entries(options.queryParams)) {
       if (val !== undefined && val !== null) {
         params.append(key, String(val));
       }
     }
-    const qs = params.toString();
-    if (qs) {
-      path = `${path}?${qs}`;
-    }
+  }
+
+  // Add Meta App Secret Proof
+  // params.set("appsecret_proof", generateAppSecretProof(options.accessToken));
+
+  const qs = params.toString();
+
+  if (qs) {
+    path = `${path}?${qs}`;
   }
 
   const method = options.method ?? "POST";
   let response: Response;
+
+  console.log("[META REQUEST DIAGNOSTIC]", {
+    graphApiVersion: whatsappConfig.graphApiVersion,
+    appIdConfigured: Boolean(whatsappConfig.appId),
+    appSecretConfigured: Boolean(whatsappConfig.appSecret),
+    accessTokenPresent: Boolean(options.accessToken),
+    accessTokenLength: options.accessToken.length,
+    endpoint: options.endpoint,
+    method,
+  });
 
   try {
     response = await fetch(path, {
@@ -225,6 +332,7 @@ export async function makeWhatsAppApiRequest(
       code: errorData?.error?.code,
       subcode: errorData?.error?.error_subcode,
       type: errorData?.error?.type,
+      message: errorData?.error?.message,
       fbtrace_id: errorData?.error?.fbtrace_id,
     });
 
@@ -264,7 +372,9 @@ export async function verifyWhatsAppCredentials(
   }
 
   const displayPhoneNumber =
-    typeof data.display_phone_number === "string" ? data.display_phone_number : "";
+    typeof data.display_phone_number === "string"
+      ? data.display_phone_number
+      : "";
 
   const verifiedName =
     typeof data.verified_name === "string" ? data.verified_name : undefined;
@@ -313,7 +423,8 @@ export async function verifyWhatsAppBusinessAccount(
   return {
     id,
     name: typeof data.name === "string" ? data.name : undefined,
-    timezoneId: typeof data.timezone_id === "string" ? data.timezone_id : undefined,
+    timezoneId:
+      typeof data.timezone_id === "string" ? data.timezone_id : undefined,
     currency: typeof data.currency === "string" ? data.currency : undefined,
   };
 }
@@ -341,6 +452,23 @@ export async function verifyPhoneNumberInWaba(
 }
 
 /**
+ * Subscribes the Meta App to a WhatsApp Business Account.
+ */
+export async function subscribeWabaToMetaApp(
+  businessAccountId: string,
+  accessToken: string,
+): Promise<boolean> {
+  const data = await makeWhatsAppApiRequest({
+    nodeId: businessAccountId,
+    endpoint: "subscribed_apps",
+    method: "POST",
+    accessToken,
+  });
+
+  return data.success === true;
+}
+
+/**
  * Helper to execute a workspace-scoped WhatsApp API request by phone number ID.
  */
 export async function makeWorkspaceWhatsAppRequest(
@@ -360,6 +488,19 @@ export async function makeWorkspaceWhatsAppRequest(
   }
 
   const accessToken = decrypt(account.accessTokenEncrypted);
+
+  console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
+    action: "WORKSPACE_REQUEST",
+    workspaceId,
+    phoneNumberId: account.phoneNumberId,
+    endpoint,
+    method: "POST",
+    hasAccessToken: Boolean(accessToken),
+    hasBody: Boolean(body),
+    recipientType: body.recipient_type,
+    messagingProduct: body.messaging_product,
+    messageType: body.type,
+  });
 
   return makeWhatsAppApiRequest({
     nodeId: account.phoneNumberId,

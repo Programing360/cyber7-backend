@@ -455,7 +455,7 @@ export async function updateDraftCampaign({
       status: "DRAFT",
     },
     { $set: updates },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   );
 
   if (!campaign) {
@@ -592,7 +592,7 @@ export async function scheduleCampaign({
         totalRecipients: resolution.recipients.length,
       },
     },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   );
 
   if (!campaign) {
@@ -631,7 +631,7 @@ export async function cancelCampaign({
       status: { $in: CANCELLABLE_STATUSES },
     },
     { $set: { status: "CANCELLED" } },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   );
 
   if (!campaign) {
@@ -673,7 +673,7 @@ export async function pauseCampaign({
       status: { $in: PAUSABLE_STATUSES },
     },
     { $set: { status: "PAUSED" } },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   );
 
   if (!campaign) {
@@ -731,7 +731,7 @@ export async function resumeCampaign({
       status: "PAUSED",
     },
     { $set: { status: "SCHEDULED" } },
-    { new: true, runValidators: true },
+    { returnDocument: "after", runValidators: true },
   );
 
   if (!campaign) {

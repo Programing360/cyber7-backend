@@ -289,7 +289,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
         };
         const res = createMockResponse();
 
-        await requireInternalIngressAuth(req, res, () => {});
+        await requireInternalIngressAuth(req, res, () => { });
 
         assert.equal(res.statusCode, 401, `Failed for timestamp: ${ts}`);
         assert.equal(res.body?.code, "INVALID_TIMESTAMP");
@@ -308,7 +308,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       };
       const res = createMockResponse();
 
-      await requireInternalIngressAuth(req, res, () => {});
+      await requireInternalIngressAuth(req, res, () => { });
 
       assert.equal(res.statusCode, 401);
       assert.equal(res.body?.code, "EXPIRED_TIMESTAMP");
@@ -326,7 +326,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       };
       const res = createMockResponse();
 
-      await requireInternalIngressAuth(req, res, () => {});
+      await requireInternalIngressAuth(req, res, () => { });
 
       assert.equal(res.statusCode, 401);
       assert.equal(res.body?.code, "EXPIRED_TIMESTAMP");
@@ -352,7 +352,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
         };
         const res = createMockResponse();
 
-        await requireInternalIngressAuth(req, res, () => {});
+        await requireInternalIngressAuth(req, res, () => { });
 
         assert.equal(res.statusCode, 401, `Failed for nonce: ${nonce}`);
         assert.equal(res.body?.code, "INVALID_NONCE");
@@ -377,7 +377,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       };
       const res = createMockResponse();
 
-      await requireInternalIngressAuth(req, res, () => {});
+      await requireInternalIngressAuth(req, res, () => { });
 
       assert.equal(res.statusCode, 401);
       assert.equal(res.body?.code, "INVALID_INTERNAL_SIGNATURE");
@@ -557,17 +557,60 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
   });
 
   describe("3. Legacy Route Removal and End-to-End Routing via App", () => {
-    it("returns 404 for legacy GET /api/whatsapp/webhook (removed)", async () => {
-      const req = createMockAppRequest({
+    it("handles public GET /api/whatsapp/webhook verification (200 on valid, 403 on invalid)", async () => {
+      // 1. Missing or invalid query returns 403
+      const reqInvalid = createMockAppRequest({
         method: "GET",
         url: "/api/whatsapp/webhook",
+      });
+      const resInvalid = createMockResponse();
+      await dispatchAppRequest(reqInvalid, resInvalid);
+      assert.equal(resInvalid.statusCode, 403);
+
+      // 2. Valid handshake returns 200 plain text challenge
+      const originalVerifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
+      process.env.META_WEBHOOK_VERIFY_TOKEN = "test_meta_verify_token_123";
+      mock.method(MetaPlatformConfig, "findOneAndUpdate", async () => ({
+        key: "webhook_verification",
+        webhookVerified: true,
+      }));
+
+      const reqValid = createMockAppRequest({
+        method: "GET",
+        url: "/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=test_meta_verify_token_123&hub.challenge=test_challenge_abc",
+      });
+      (reqValid as any).query = {
+        "hub.mode": "subscribe",
+        "hub.verify_token": "test_meta_verify_token_123",
+        "hub.challenge": "test_challenge_abc",
+      };
+      const resValid = createMockResponse();
+      await dispatchAppRequest(reqValid, resValid);
+      assert.equal(resValid.statusCode, 200);
+      assert.equal(resValid.body, "test_challenge_abc");
+
+      if (originalVerifyToken !== undefined) {
+        process.env.META_WEBHOOK_VERIFY_TOKEN = originalVerifyToken;
+      } else {
+        delete process.env.META_WEBHOOK_VERIFY_TOKEN;
+      }
+    });
+
+    it("rejects unauthenticated request to POST /api/whatsapp/internal/webhook with 401", async () => {
+      const req = createMockAppRequest({
+        method: "POST",
+        url: "/api/whatsapp/internal/webhook",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: {},
       });
       const res = createMockResponse();
 
       await dispatchAppRequest(req, res);
 
-      assert.equal(res.statusCode, 404);
-      assert.equal(res.body?.message, "API route not found");
+      assert.equal(res.statusCode, 401);
+      assert.equal(res.body?.code, "INVALID_TIMESTAMP");
     });
 
     it("rejects unauthenticated request to POST /api/whatsapp/internal/webhook-verified with 401", async () => {
@@ -717,14 +760,14 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       assert.equal(res.body?.code, "INVALID_META_SIGNATURE");
     });
 
-    it("safely handles valid signed test_ping: consumes security nonce, incurs zero business mutations, returns 200", async () => {
+    it("safely handles valid signed test_ping on internal webhook: consumes security nonce, incurs zero business mutations, returns 200", async () => {
       const timestamp = String(Date.now());
       const nonce = "550e8400-e29b-41d4-a716-446655440010";
       const rawBody = Buffer.from(JSON.stringify({ object: "test_ping" }));
 
       const internalSig = computeCanonicalInternalHmac(
         "POST",
-        "/api/whatsapp/webhook",
+        "/api/whatsapp/internal/webhook",
         timestamp,
         nonce,
         rawBody,
@@ -756,7 +799,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
 
       const req = createMockAppRequest({
         method: "POST",
-        url: "/api/whatsapp/webhook",
+        url: "/api/whatsapp/internal/webhook",
         headers: {
           "content-type": "application/json",
           "x-internal-timestamp": timestamp,
@@ -783,7 +826,68 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       assert.equal(accountModified, false, "Expected zero WhatsApp accounts to be modified");
     });
 
-    it("acknowledges duplicate waMessageId with HTTP 200 without creating duplicate business records", async () => {
+    it("allows public POST /api/whatsapp/webhook with valid Meta signature without requiring internal ingress headers", async () => {
+      const rawBody = Buffer.from(JSON.stringify({ object: "test_ping" }));
+      const metaSig = generateMetaSignature(rawBody, TEST_META_APP_SECRET);
+
+      const req = createMockAppRequest({
+        method: "POST",
+        url: "/api/whatsapp/webhook",
+        headers: {
+          "content-type": "application/json",
+          "x-hub-signature-256": metaSig,
+        },
+        rawBody,
+        body: JSON.parse(rawBody.toString()),
+      });
+      const res = createMockResponse();
+
+      await dispatchAppRequest(req, res);
+
+      assert.equal(res.statusCode, 200);
+    });
+
+    it("does not allow internal ingress authentication to substitute for Meta signature on internal webhook", async () => {
+      const timestamp = String(Date.now());
+      const nonce = "550e8400-e29b-41d4-a716-446655440097";
+      const rawBody = Buffer.from(JSON.stringify({ object: "whatsapp_business_account" }));
+
+      const internalSig = computeCanonicalInternalHmac(
+        "POST",
+        "/api/whatsapp/internal/webhook",
+        timestamp,
+        nonce,
+        rawBody,
+        TEST_INTERNAL_SECRET,
+      );
+
+      mock.method(InternalWebhookNonce.collection, "insertOne", async (doc: any) => ({
+        acknowledged: true,
+        insertedId: doc._id,
+      }));
+
+      const req = createMockAppRequest({
+        method: "POST",
+        url: "/api/whatsapp/internal/webhook",
+        headers: {
+          "content-type": "application/json",
+          "x-internal-timestamp": timestamp,
+          "x-internal-nonce": nonce,
+          "x-internal-signature": internalSig,
+          // Intentionally omitting x-hub-signature-256
+        },
+        rawBody,
+        body: JSON.parse(rawBody.toString()),
+      });
+      const res = createMockResponse();
+
+      await dispatchAppRequest(req, res);
+
+      assert.equal(res.statusCode, 401);
+      assert.equal(res.body?.code, "INVALID_META_SIGNATURE");
+    });
+
+    it("acknowledges duplicate waMessageId with HTTP 200 on internal webhook without creating duplicate business records", async () => {
       const timestamp = String(Date.now());
       const nonce = "550e8400-e29b-41d4-a716-446655440011";
 
@@ -819,7 +923,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
       const rawBody = Buffer.from(JSON.stringify(payload));
       const internalSig = computeCanonicalInternalHmac(
         "POST",
-        "/api/whatsapp/webhook",
+        "/api/whatsapp/internal/webhook",
         timestamp,
         nonce,
         rawBody,
@@ -861,7 +965,7 @@ describe("Step 45A: Internal Webhook Security & Ingress Mutual Authentication", 
 
       const req = createMockAppRequest({
         method: "POST",
-        url: "/api/whatsapp/webhook",
+        url: "/api/whatsapp/internal/webhook",
         headers: {
           "content-type": "application/json",
           "x-internal-timestamp": timestamp,

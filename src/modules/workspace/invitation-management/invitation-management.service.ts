@@ -109,7 +109,7 @@ export async function revokeWorkspaceInvitation(
       $set: { status: "REVOKED" },
     },
     {
-      new: true,
+      returnDocument: "after",
     },
   ).select("-tokenHash");
 

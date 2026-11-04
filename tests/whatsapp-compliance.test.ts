@@ -1258,5 +1258,174 @@ describe("Phase E: Webhook Reliability & Security", () => {
       );
       assert.equal(doesNotBelong, false);
     });
+
+    it("29. correctly maps Meta code 100 parameter errors (e.g. 'parameter to is required') to recipient error instead of Phone Number ID error", () => {
+      const err = mapMetaApiError(400, {
+        message: "The parameter to is required.",
+        type: "OAuthException",
+        code: 100,
+        fbtrace_id: "A7sQzMykLX6en4DDu1_lu-z",
+      });
+
+      assert.equal(err.statusCode, 400);
+      assert.equal(err.code, "INVALID_RECIPIENT_PHONE");
+      assert.match(err.message, /recipient|phone number/i);
+      assert.doesNotMatch(err.message, /phone number id/i);
+    });
+
+    it("30. correctly maps Meta code 131047 / subcode 2494010 to 24-hour window expired (HTTP 422)", () => {
+      const err = mapMetaApiError(400, {
+        message: "Message failed to send because more than 24 hours have passed since the customer last replied to this number.",
+        type: "OAuthException",
+        code: 131047,
+        error_subcode: 2494010,
+        fbtrace_id: "B8tRaNzkMY7fo5EEv2_mv-a",
+      });
+
+      assert.equal(err.statusCode, 422);
+      assert.equal(err.code, "CUSTOMER_SERVICE_WINDOW_EXPIRED");
+      assert.match(err.message, /customer service window/i);
+    });
+
+    it("31. correctly maps Meta code 131026 / 131030 to recipient undeliverable (HTTP 400)", () => {
+      const errUndeliverable = mapMetaApiError(400, {
+        message: "Message undeliverable.",
+        type: "OAuthException",
+        code: 131026,
+      });
+
+      assert.equal(errUndeliverable.statusCode, 400);
+      assert.equal(errUndeliverable.code, "RECIPIENT_UNDELIVERABLE");
+      assert.match(errUndeliverable.message, /undeliverable|valid whatsapp/i);
+
+      const errInvalidUser = mapMetaApiError(400, {
+        message: "Recipient is not a valid WhatsApp user.",
+        type: "OAuthException",
+        code: 131030,
+      });
+
+      assert.equal(errInvalidUser.statusCode, 400);
+      assert.equal(errInvalidUser.code, "RECIPIENT_UNDELIVERABLE");
+      assert.match(errInvalidUser.message, /valid whatsapp/i);
+    });
+
+    it("32. sendWhatsAppTextMessage rejects invalid or missing recipient phone numbers before calling Meta API", async () => {
+      const recentTime = new Date();
+
+      mock.method(WhatsAppConversation, "findOne", async () => ({
+        _id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        whatsappAccountId: ACCOUNT_ID,
+        contactId: CONTACT_ID,
+        status: "OPEN",
+        lastCustomerMessageAt: recentTime,
+      }));
+
+      // Contact has no waId and no phoneNumber
+      mock.method(WhatsAppContact, "findOne", async () => ({
+        _id: CONTACT_ID,
+        isOptedOut: false,
+        waId: "",
+        phoneNumber: "",
+      }));
+
+      mock.method(WhatsAppAccount, "findOne", async () => ({
+        _id: ACCOUNT_ID,
+        phoneNumberId: "phone_123",
+        status: "CONNECTED",
+      }));
+
+      let fetchCalled = false;
+      mock.method(global, "fetch", async () => {
+        fetchCalled = true;
+        return new Response(JSON.stringify({ messages: [{ id: "wamid.123" }] }));
+      });
+
+      await assert.rejects(
+        () =>
+          sendWhatsAppTextMessage({
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            senderId: USER_ID,
+            text: "Hello test",
+          }),
+        (err: any) => {
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "INVALID_RECIPIENT_PHONE");
+          assert.match(err.message, /valid whatsapp phone number/i);
+          return true;
+        },
+      );
+
+      assert.equal(fetchCalled, false, "Meta API fetch must not be called when recipient is invalid");
+    });
+
+    it("33. sendWhatsAppTextMessage self-heals missing contact.waId from phoneNumber", async () => {
+      const recentTime = new Date();
+
+      mock.method(WhatsAppConversation, "findOne", async () => ({
+        _id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        whatsappAccountId: ACCOUNT_ID,
+        contactId: CONTACT_ID,
+        status: "OPEN",
+        lastCustomerMessageAt: recentTime,
+        save: async () => {},
+      }));
+
+      let savedWaId = "";
+      const mockContact = {
+        _id: CONTACT_ID,
+        isOptedOut: false,
+        waId: "",
+        phoneNumber: "+880 1754-318654",
+        save: async function () {
+          savedWaId = this.waId;
+        },
+      };
+
+      mock.method(WhatsAppContact, "findOne", async () => mockContact);
+
+      mock.method(WhatsAppAccount, "findOne", () => ({
+        select: async () => ({
+          _id: ACCOUNT_ID,
+          phoneNumberId: "phone_123",
+          status: "CONNECTED",
+          accessTokenEncrypted: encrypt("valid_test_meta_token_1234567890"),
+        }),
+        _id: ACCOUNT_ID,
+        phoneNumberId: "phone_123",
+        status: "CONNECTED",
+        accessTokenEncrypted: encrypt("valid_test_meta_token_1234567890"),
+      }));
+
+      let sentRecipient = "";
+      mock.method(global, "fetch", async (_url: any, init: any) => {
+        const body = JSON.parse(init.body);
+        sentRecipient = body.to;
+        return new Response(
+          JSON.stringify({
+            messages: [{ id: "wamid.self_heal_success" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      });
+
+      mock.method(WhatsAppMessage, "create", async (doc: any) => ({
+        ...doc,
+        _id: new Types.ObjectId(),
+      }));
+
+      const msg = await sendWhatsAppTextMessage({
+        workspaceId: WORKSPACE_ID,
+        conversationId: CONVERSATION_ID,
+        senderId: USER_ID,
+        text: "Healing test message",
+      });
+
+      assert.equal(msg.waMessageId, "wamid.self_heal_success");
+      assert.equal(savedWaId, "8801754318654", "Contact waId should be healed to clean digits");
+      assert.equal(sentRecipient, "8801754318654", "Outgoing Meta request should use healed phone number");
+    });
   });
 });

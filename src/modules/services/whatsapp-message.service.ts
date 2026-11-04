@@ -15,7 +15,11 @@ import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import Workspace from "../workspace/workspace.model.js";
 import { makeWorkspaceWhatsAppRequest } from "./whatsapp-api.service.js";
 
-export { CUSTOMER_SERVICE_WINDOW_MS, isCustomerServiceWindowOpen, getCustomerServiceWindowExpiry };
+export {
+  CUSTOMER_SERVICE_WINDOW_MS,
+  isCustomerServiceWindowOpen,
+  getCustomerServiceWindowExpiry,
+};
 
 export const STATUS_RANK: Record<WhatsAppMessageStatus, number> = {
   RECEIVED: 0,
@@ -46,11 +50,37 @@ export async function processIncomingWhatsAppMessage({
   contactName,
   message,
 }: ProcessIncomingMessageParams) {
+  // Validate incoming message from identifier
+  if (!message.from || typeof message.from !== "string" || !message.from.trim()) {
+    console.error("[WhatsApp Inbound] Missing or invalid message.from identifier");
+    return {
+      accountNotFound: false,
+      duplicate: false,
+    };
+  }
+
+  const rawFrom = message.from.trim();
+  const cleanFrom = rawFrom.replace(/\D/g, "");
+  if (!cleanFrom || cleanFrom.length < 5) {
+    console.error(`[WhatsApp Inbound] Invalid message sender phone number: ${rawFrom}`);
+    return {
+      accountNotFound: false,
+      duplicate: false,
+    };
+  }
+
   // 1. Find connected WhatsApp account
   const cleanPhoneId = phoneNumberId.trim();
   const account = await WhatsAppAccount.findOne({
     phoneNumberId: cleanPhoneId,
     status: "CONNECTED",
+  });
+
+  console.log("[INBOUND ACCOUNT CHECK]", {
+    phoneNumberId: cleanPhoneId,
+    accountFound: Boolean(account),
+    accountStatus: account?.status,
+    workspaceId: account?.workspaceId?.toString(),
   });
 
   if (!account) {
@@ -101,16 +131,21 @@ export async function processIncomingWhatsAppMessage({
   const rawText = (message.text || "").trim();
   // Strip trailing punctuation common in mobile messaging (. , ! ? ; : and Bengali Dari ।)
   const cleanedText = rawText.replace(/[.,!?;:\u0964]+$/, "").trim();
-  const isStopKeyword = /^(stop|unsubscribe|cancel|optout|opt-out|quit)$/i.test(cleanedText);
+  const isStopKeyword = /^(stop|unsubscribe|cancel|optout|opt-out|quit)$/i.test(
+    cleanedText,
+  );
   const isStartKeyword = /^(start|unstop)$/i.test(cleanedText);
 
   // 3. Find or create contact with opt-out / opt-in tracking
   const contactUpdate: Record<string, unknown> = {
-    phoneNumber: message.from,
+    waId: cleanFrom,
+    phoneNumber: rawFrom,
     ...(contactName ? { profileName: contactName } : {}),
   };
 
-  const contactSetOnInsert: Record<string, unknown> = {};
+  const contactSetOnInsert: Record<string, unknown> = {
+    waId: cleanFrom,
+  };
   const contactUnset: Record<string, 1> = {};
 
   if (isStopKeyword) {
@@ -129,7 +164,7 @@ export async function processIncomingWhatsAppMessage({
   const contact = await WhatsAppContact.findOneAndUpdate(
     {
       workspaceId: account.workspaceId,
-      waId: message.from,
+      waId: cleanFrom,
     },
     {
       $set: contactUpdate,
@@ -140,7 +175,7 @@ export async function processIncomingWhatsAppMessage({
     },
     {
       upsert: true,
-      new: true,
+      returnDocument: "after",
       setDefaultsOnInsert: true,
     },
   );
@@ -163,10 +198,17 @@ export async function processIncomingWhatsAppMessage({
     },
     {
       upsert: true,
-      new: true,
+      returnDocument: "after",
       setDefaultsOnInsert: true,
     },
   );
+
+  console.log("[INBOUND MESSAGE SAVE]", {
+    waMessageId: message.id,
+    conversationId: conversation._id.toString(),
+    contactId: contact._id.toString(),
+    type: message.type,
+  });
 
   // 5. Save incoming message
   try {
@@ -183,6 +225,11 @@ export async function processIncomingWhatsAppMessage({
       mediaId: message.mediaId,
       mediaMimeType: message.mediaMimeType,
       timestamp: incomingDate,
+    });
+
+    console.log("[INBOUND MESSAGE SAVED]", {
+      messageId: savedMessage._id.toString(),
+      waMessageId: savedMessage.waMessageId,
     });
 
     return {
@@ -253,7 +300,10 @@ export async function updateWhatsAppMessageStatus({
   });
 
   if (!message) {
-    console.warn("[WhatsApp Status] Message not found for status update:", messageId);
+    console.warn(
+      "[WhatsApp Status] Message not found for status update:",
+      messageId,
+    );
     return null;
   }
 
@@ -272,7 +322,10 @@ export async function updateWhatsAppMessageStatus({
 
   // Rule 3: If status rank is equal, only update if incoming timestamp is newer or equal
   if (newRank === currentRank) {
-    if (message.statusUpdatedAt && incomingTimestamp < message.statusUpdatedAt) {
+    if (
+      message.statusUpdatedAt &&
+      incomingTimestamp < message.statusUpdatedAt
+    ) {
       return message;
     }
   }
@@ -354,7 +407,48 @@ export async function sendWhatsAppTextMessage({
     throw new AppError("WhatsApp account not connected", 404);
   }
 
-  // 5. Send message through Meta WhatsApp Cloud API.
+  // 5. Validate recipient phone number integrity before outbound sending
+  const rawRecipient = contact.waId || contact.phoneNumber || "";
+  const recipientPhone = rawRecipient.replace(/\D/g, "");
+
+  if (!recipientPhone || recipientPhone.length < 5) {
+    throw new AppError(
+      "Contact does not have a valid WhatsApp phone number. Please update the contact's phone number.",
+      400,
+      "INVALID_RECIPIENT_PHONE",
+    );
+  }
+
+  // Proactive self-heal: ensure contact waId in DB matches valid recipientPhone
+  if (
+    (!contact.waId || contact.waId !== recipientPhone) &&
+    typeof (contact as { save?: () => Promise<unknown> }).save === "function"
+  ) {
+    contact.waId = recipientPhone;
+    if (!contact.phoneNumber) {
+      contact.phoneNumber = recipientPhone;
+    }
+    await (contact as { save: () => Promise<unknown> }).save().catch((err: unknown) => {
+      console.warn("[Contact Self-Heal Warning] Failed to update contact waId:", err);
+    });
+  }
+
+  console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
+    action: "SEND_TEXT_MESSAGE",
+    workspaceId: String(workspaceId),
+    phoneNumberId: account.phoneNumberId,
+    conversationId: conversation._id.toString(),
+    contactId: contact._id.toString(),
+    recipientPhoneMasked:
+      recipientPhone.length > 4
+        ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
+        : "****",
+    messageType: "text",
+    textLength: text.length,
+    hasToken: Boolean(account.accessTokenEncrypted),
+  });
+
+  // 6. Send message through Meta WhatsApp Cloud API.
   const apiResponse = await makeWorkspaceWhatsAppRequest(
     workspaceId,
     account.phoneNumberId,
@@ -362,7 +456,7 @@ export async function sendWhatsAppTextMessage({
     {
       messaging_product: "whatsapp",
       recipient_type: "individual",
-      to: contact.waId,
+      to: recipientPhone,
       type: "text",
       text: {
         preview_url: false,
@@ -371,21 +465,16 @@ export async function sendWhatsAppTextMessage({
     },
   );
 
-  // 6. Extract Meta message ID.
-  const messages = apiResponse.messages as
-    | Array<{ id?: string }>
-    | undefined;
+  // 7. Extract Meta message ID.
+  const messages = apiResponse.messages as Array<{ id?: string }> | undefined;
 
   const waMessageId = messages?.[0]?.id;
 
   if (!waMessageId) {
-    throw new AppError(
-      "WhatsApp API did not return a message ID",
-      502,
-    );
+    throw new AppError("WhatsApp API did not return a message ID", 502);
   }
 
-  // 7. Save outgoing message.
+  // 8. Save outgoing message.
   const savedMessage = await WhatsAppMessage.create({
     workspaceId,
     conversationId: conversation._id,
@@ -399,6 +488,11 @@ export async function sendWhatsAppTextMessage({
     senderId,
     timestamp: new Date(),
     statusUpdatedAt: undefined,
+  }); 
+
+  console.log("[OUTBOUND MESSAGE SAVED]", {
+    messageId: savedMessage._id.toString(),
+    waMessageId: savedMessage.waMessageId,
   });
 
   // 8. Update conversation activity.
@@ -449,7 +543,7 @@ export async function sendWhatsAppTemplateMessage({
     _id: conversationObjectId,
     workspaceId: workspaceObjectId,
   });
-
+  console.log(conversation);
   if (!conversation) {
     throw new AppError("Conversation not found", 404);
   }
@@ -503,7 +597,9 @@ export async function sendWhatsAppTemplateMessage({
   }
 
   // 5. Validate required template variables and components
-  type TemplateComponentItem = NonNullable<SendWhatsAppTemplateMessageParams["components"]>[number];
+  type TemplateComponentItem = NonNullable<
+    SendWhatsAppTemplateMessageParams["components"]
+  >[number];
   const validatedComponents: TemplateComponentItem[] = [];
 
   // 5a. Header validation
@@ -514,7 +610,9 @@ export async function sendWhatsAppTemplateMessage({
     if (["IMAGE", "DOCUMENT", "VIDEO"].includes(headerFormat)) {
       const mediaTypeLower = headerFormat.toLowerCase();
       const hasMediaParam = headerComponent?.parameters?.some(
-        (p) => p.type === mediaTypeLower && (p as Record<string, unknown>)[mediaTypeLower],
+        (p) =>
+          p.type === mediaTypeLower &&
+          (p as Record<string, unknown>)[mediaTypeLower],
       );
 
       if (!headerComponent || !hasMediaParam) {
@@ -578,14 +676,21 @@ export async function sendWhatsAppTemplateMessage({
   // 5c. Button parameters validation
   const buttonComponents = components?.filter((c) => c.type === "button") || [];
   for (const btn of buttonComponents) {
-    if (btn.index === undefined || btn.index < 0 || typeof btn.index !== "number") {
+    if (
+      btn.index === undefined ||
+      btn.index < 0 ||
+      typeof btn.index !== "number"
+    ) {
       throw new AppError(
         "Button component requires a non-negative index",
         400,
         "INVALID_TEMPLATE_BUTTON_PARAMETERS",
       );
     }
-    if (!btn.sub_type || !["url", "quick_reply"].includes(btn.sub_type.toLowerCase())) {
+    if (
+      !btn.sub_type ||
+      !["url", "quick_reply"].includes(btn.sub_type.toLowerCase())
+    ) {
       throw new AppError(
         "Button component requires a valid sub_type (url or quick_reply)",
         400,
@@ -618,6 +723,48 @@ export async function sendWhatsAppTemplateMessage({
     templatePayload.components = sortedComponents;
   }
 
+  // 6. Validate recipient phone number integrity before template sending
+  const rawRecipient = contact.waId || contact.phoneNumber || "";
+  const recipientPhone = rawRecipient.replace(/\D/g, "");
+
+  if (!recipientPhone || recipientPhone.length < 5) {
+    throw new AppError(
+      "Contact does not have a valid WhatsApp phone number. Please update the contact's phone number.",
+      400,
+      "INVALID_RECIPIENT_PHONE",
+    );
+  }
+
+  // Proactive self-heal: ensure contact waId in DB matches valid recipientPhone
+  if (
+    (!contact.waId || contact.waId !== recipientPhone) &&
+    typeof (contact as { save?: () => Promise<unknown> }).save === "function"
+  ) {
+    contact.waId = recipientPhone;
+    if (!contact.phoneNumber) {
+      contact.phoneNumber = recipientPhone;
+    }
+    await (contact as { save: () => Promise<unknown> }).save().catch((err: unknown) => {
+      console.warn("[Contact Self-Heal Warning] Failed to update contact waId:", err);
+    });
+  }
+
+  console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
+    action: "SEND_TEMPLATE_MESSAGE",
+    workspaceId: workspaceObjectId.toString(),
+    phoneNumberId: account.phoneNumberId,
+    conversationId: conversation._id.toString(),
+    contactId: contact._id.toString(),
+    recipientPhoneMasked:
+      recipientPhone.length > 4
+        ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
+        : "****",
+    messageType: "template",
+    templateName: template.name,
+    templateLanguage: template.language,
+    hasToken: Boolean(account.accessTokenEncrypted),
+  });
+
   const apiResponse = await makeWorkspaceWhatsAppRequest(
     workspaceId,
     account.phoneNumberId,
@@ -625,24 +772,19 @@ export async function sendWhatsAppTemplateMessage({
     {
       messaging_product: "whatsapp",
       recipient_type: "individual",
-      to: contact.waId,
+      to: recipientPhone,
       type: "template",
       template: templatePayload,
     },
   );
 
   // 7. Extract Meta message ID.
-  const messages = apiResponse.messages as
-    | Array<{ id?: string }>
-    | undefined;
+  const messages = apiResponse.messages as Array<{ id?: string }> | undefined;
 
   const waMessageId = messages?.[0]?.id;
 
   if (!waMessageId) {
-    throw new AppError(
-      "WhatsApp API did not return a message ID",
-      502,
-    );
+    throw new AppError("WhatsApp API did not return a message ID", 502);
   }
 
   // 8. Save outgoing template message.
