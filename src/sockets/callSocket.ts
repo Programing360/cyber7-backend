@@ -388,34 +388,40 @@ export const initCallSocket = (io: CallSocketServer): void => {
   /**
    * Socket authentication middleware.
    */
+  // callSocket.ts - io.use মিডলওয়্যারে এই অংশটি আপডেট করুন:
+
   io.use(async (socket, next) => {
     try {
       const authenticatedSocket = socket as CallSocket;
-
       const token = getAccessToken(authenticatedSocket);
 
       if (!token) {
         return next(new Error("Authentication token is required."));
       }
 
-      const payload = verifyAccessToken(token);
+      const payload = verifyAccessToken(token) as any;
 
-      if (!payload?.sub) {
-        return next(new Error("Invalid authentication token."));
+      // sub, userId অথবা id — যে কোনো একটি থাকলে গ্রহণ করবে
+      const userId = payload?.sub || payload?.userId || payload?.id;
+
+      if (!userId || !isValidObjectId(userId)) {
+        return next(
+          new Error("Invalid authentication token payload (User ID missing)."),
+        );
       }
 
-      const user = await User.findById(payload.sub)
-        .select("_id isActive")
-        .lean();
+      const user = await User.findById(userId).select("_id isActive").lean();
 
       if (!user || !user.isActive) {
-        return next(new Error("User authentication failed."));
+        return next(
+          new Error("User authentication failed or account inactive."),
+        );
       }
 
       authenticatedSocket.data.userId = user._id.toString();
-
       return next();
-    } catch {
+    } catch (error: any) {
+      console.error("[Call Socket Auth Error]:", error?.message);
       return next(new Error("Invalid or expired authentication token."));
     }
   });
