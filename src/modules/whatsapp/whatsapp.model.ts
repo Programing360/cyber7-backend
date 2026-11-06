@@ -88,10 +88,7 @@ const whatsappAccountSchema = new Schema<IWhatsAppAccount>(
 whatsappAccountSchema.index({ phoneNumberId: 1 }, { unique: true });
 
 // Prevent duplicate WABA registration inside a workspace.
-whatsappAccountSchema.index(
-  { workspaceId: 1, businessAccountId: 1 },
-  { unique: true },
-);
+whatsappAccountSchema.index({ workspaceId: 1, businessAccountId: 1 });
 
 const WhatsAppAccount: Model<IWhatsAppAccount> =
   mongoose.models.WhatsAppAccount ||

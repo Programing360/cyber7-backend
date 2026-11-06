@@ -51,8 +51,14 @@ export async function processIncomingWhatsAppMessage({
   message,
 }: ProcessIncomingMessageParams) {
   // Validate incoming message from identifier
-  if (!message.from || typeof message.from !== "string" || !message.from.trim()) {
-    console.error("[WhatsApp Inbound] Missing or invalid message.from identifier");
+  if (
+    !message.from ||
+    typeof message.from !== "string" ||
+    !message.from.trim()
+  ) {
+    console.error(
+      "[WhatsApp Inbound] Missing or invalid message.from identifier",
+    );
     return {
       accountNotFound: false,
       duplicate: false,
@@ -62,7 +68,9 @@ export async function processIncomingWhatsAppMessage({
   const rawFrom = message.from.trim();
   const cleanFrom = rawFrom.replace(/\D/g, "");
   if (!cleanFrom || cleanFrom.length < 5) {
-    console.error(`[WhatsApp Inbound] Invalid message sender phone number: ${rawFrom}`);
+    console.error(
+      `[WhatsApp Inbound] Invalid message sender phone number: ${rawFrom}`,
+    );
     return {
       accountNotFound: false,
       duplicate: false,
@@ -137,14 +145,14 @@ export async function processIncomingWhatsAppMessage({
   const isStartKeyword = /^(start|unstop)$/i.test(cleanedText);
 
   // 3. Find or create contact with opt-out / opt-in tracking
+  // ⚠️ ফিক্স: waId ফিল্ডটি $set এবং $setOnInsert দুটো থেকেই বাদ দেওয়া হয়েছে (ফিল্টারের কারণে অটো সেট হবে)
   const contactUpdate: Record<string, unknown> = {
-    waId: cleanFrom,
     phoneNumber: rawFrom,
     ...(contactName ? { profileName: contactName } : {}),
   };
 
   const contactSetOnInsert: Record<string, unknown> = {
-    waId: cleanFrom,
+    createdAt: incomingDate,
   };
   const contactUnset: Record<string, 1> = {};
 
@@ -153,8 +161,6 @@ export async function processIncomingWhatsAppMessage({
     contactUpdate.optOutTimestamp = incomingDate;
     contactUpdate.optOutSource = "STOP_MESSAGE";
   } else if (isStartKeyword) {
-    // Record conversational opt-in audit trail
-    // NOTE: START/UNSTOP alone does NOT automatically grant marketing consent (isOptedOut is preserved)
     contactUpdate.optInTimestamp = incomingDate;
     contactUpdate.optInSource = "START_MESSAGE";
   } else {
@@ -269,17 +275,6 @@ export interface UpdateWhatsAppMessageStatusParams {
   errorMessage?: string;
 }
 
-/**
- * Updates message status according to strict status progression and timestamp rules.
- *
- * Rules:
- * 1. FAILED messages are terminal and cannot be overwritten by older or intermediate events.
- * 2. Status rank hierarchy (RECEIVED < SENT < DELIVERED < READ < FAILED) must be enforced.
- *    READ can never regress to DELIVERED or SENT.
- *    DELIVERED can never regress to SENT.
- * 3. Equal-rank status updates are rejected if incoming timestamp is older than recorded.
- * 4. Local millisecond timestamps at creation time do not block early Meta status events.
- */
 export async function updateWhatsAppMessageStatus({
   whatsappAccountId,
   messageId,
@@ -428,9 +423,14 @@ export async function sendWhatsAppTextMessage({
     if (!contact.phoneNumber) {
       contact.phoneNumber = recipientPhone;
     }
-    await (contact as { save: () => Promise<unknown> }).save().catch((err: unknown) => {
-      console.warn("[Contact Self-Heal Warning] Failed to update contact waId:", err);
-    });
+    await (contact as { save: () => Promise<unknown> })
+      .save()
+      .catch((err: unknown) => {
+        console.warn(
+          "[Contact Self-Heal Warning] Failed to update contact waId:",
+          err,
+        );
+      });
   }
 
   console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
@@ -488,14 +488,14 @@ export async function sendWhatsAppTextMessage({
     senderId,
     timestamp: new Date(),
     statusUpdatedAt: undefined,
-  }); 
+  });
 
   console.log("[OUTBOUND MESSAGE SAVED]", {
     messageId: savedMessage._id.toString(),
     waMessageId: savedMessage.waMessageId,
   });
 
-  // 8. Update conversation activity.
+  // 9. Update conversation activity.
   conversation.lastMessageAt = savedMessage.timestamp;
   await conversation.save();
 
@@ -723,7 +723,7 @@ export async function sendWhatsAppTemplateMessage({
     templatePayload.components = sortedComponents;
   }
 
-  // 6. Validate recipient phone number integrity before template sending
+  // 6b. Validate recipient phone number integrity before template sending
   const rawRecipient = contact.waId || contact.phoneNumber || "";
   const recipientPhone = rawRecipient.replace(/\D/g, "");
 
@@ -744,9 +744,14 @@ export async function sendWhatsAppTemplateMessage({
     if (!contact.phoneNumber) {
       contact.phoneNumber = recipientPhone;
     }
-    await (contact as { save: () => Promise<unknown> }).save().catch((err: unknown) => {
-      console.warn("[Contact Self-Heal Warning] Failed to update contact waId:", err);
-    });
+    await (contact as { save: () => Promise<unknown> })
+      .save()
+      .catch((err: unknown) => {
+        console.warn(
+          "[Contact Self-Heal Warning] Failed to update contact waId:",
+          err,
+        );
+      });
   }
 
   console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {

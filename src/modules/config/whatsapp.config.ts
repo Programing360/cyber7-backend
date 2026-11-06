@@ -8,6 +8,8 @@
  * 4. Return null if no valid public HTTPS URL is configured.
  * 5. Webhook callback path must match actual registered backend route (/api/whatsapp/webhook).
  */
+
+
 export function resolvePublicWebhookUrl(): string | null {
   const explicitWebhook = process.env.WEBHOOK_PUBLIC_URL?.trim();
   const publicApi = process.env.PUBLIC_API_URL?.trim();

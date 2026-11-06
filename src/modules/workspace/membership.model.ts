@@ -1,4 +1,4 @@
-import mongoose, { Schema, type InferSchemaType } from "mongoose";
+import mongoose, { Schema, type InferSchemaType, type Model } from "mongoose";
 
 const membershipSchema = new Schema(
   {
@@ -26,6 +26,7 @@ const membershipSchema = new Schema(
       type: String,
       enum: ["ACTIVE", "INVITED", "SUSPENDED"],
       default: "ACTIVE",
+      required: true,
     },
 
     joinedAt: {
@@ -39,10 +40,34 @@ const membershipSchema = new Schema(
   },
 );
 
-membershipSchema.index({ workspaceId: 1, userId: 1 }, { unique: true });
+// One membership per user in a workspace.
+membershipSchema.index(
+  {
+    workspaceId: 1,
+    userId: 1,
+  },
+  {
+    unique: true,
+    name: "unique_workspace_membership",
+  },
+);
+
+// Find active OWNER/ADMIN fallback recipients.
+membershipSchema.index(
+  {
+    workspaceId: 1,
+    role: 1,
+    status: 1,
+  },
+  {
+    name: "workspace_active_role_lookup",
+  },
+);
 
 export type MembershipDocument = InferSchemaType<typeof membershipSchema>;
 
-const Membership = mongoose.model("Membership", membershipSchema);
+const Membership: Model<MembershipDocument> =
+  (mongoose.models.Membership as Model<MembershipDocument>) ||
+  mongoose.model<MembershipDocument>("Membership", membershipSchema);
 
 export default Membership;

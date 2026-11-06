@@ -9,6 +9,7 @@ export interface AuthenticatedRequest extends Request {
     name: string;
     email: string;
     role: string;
+    platformRole: "USER" | "FINANCE_ADMIN" | "SUPER_ADMIN" | string;
   };
 }
 
@@ -43,7 +44,7 @@ export const authenticate = async (
     const payload = verifyAccessToken(token);
 
     const user = await User.findById(payload.sub).select(
-      "_id name email role isActive",
+      "_id name email role platformRole isActive",
     );
 
     if (!user || !user.isActive) {
@@ -60,6 +61,7 @@ export const authenticate = async (
       name: user.name,
       email: user.email,
       role: user.role,
+      platformRole: (user as any).platformRole || "USER",
     };
 
     next();

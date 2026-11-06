@@ -81,8 +81,6 @@ export async function connectWhatsAppAccount({
     );
   }
 
-
-
   // Step 5: Validate display phone number matches Meta registered record
   const verifiedDisplayNumber =
     phoneDetails.displayPhoneNumber || input.displayPhoneNumber;
@@ -113,7 +111,6 @@ export async function connectWhatsAppAccount({
     );
   }
 
-
   // Step 6: Subscribe WABA to Meta App
   const isSubscribed = await subscribeWabaToMetaApp(
     input.businessAccountId,
@@ -126,7 +123,6 @@ export async function connectWhatsAppAccount({
       502,
     );
   }
-
 
   // Step 7: Encrypt access token
   const encryptedToken = encrypt(input.accessToken);
@@ -285,6 +281,30 @@ export async function disconnectWhatsAppAccount({
   return { id: account._id.toString() };
 }
 
+export async function getWhatsAppAccountByPhoneNumberId(phoneNumberId: string) {
+  if (!phoneNumberId?.trim()) {
+    return null;
+  }
+
+  const account = await WhatsAppAccount.findOne({
+    phoneNumberId: phoneNumberId.trim(),
+    status: "CONNECTED",
+  })
+    .select("_id workspaceId phoneNumberId businessAccountId status")
+    .lean();
+
+  if (!account) {
+    return null;
+  }
+
+  return {
+    accountId: account._id.toString(),
+    workspaceId: account.workspaceId.toString(),
+    phoneNumberId: account.phoneNumberId,
+    businessAccountId: account.businessAccountId,
+  };
+}
+
 // ─── Webhook verification ─────────────────────────────────────────────────────
 
 // export async function markWebhookVerified(phoneNumberId: string) {
@@ -405,6 +425,9 @@ export async function getWhatsAppConfigStatus(
     ],
   );
 
+  // ✅ প্ল্যাটফর্ম রেকর্ডে true থাকলে true, অথবা কোনো অ্যাকাউন্ট সক্রিয়ভাবে কানেক্টেড থাকলে true
+  const isVerified = webhookVerified || connectedAccounts > 0;
+
   // console.log('webhookVerified', webhookVerified);
 
   return {
@@ -413,7 +436,7 @@ export async function getWhatsAppConfigStatus(
     },
     webhook: {
       configured: whatsappConfig.isWebhookConfigured,
-      verified: webhookVerified,
+      verified: isVerified,
       callbackUrl: whatsappConfig.publicWebhookUrl,
     },
     workspaceAccount: {
