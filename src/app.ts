@@ -36,35 +36,65 @@ import callingRoutes, {
 const app = express();
 const server = http.createServer(app);
 
+// 1. Trust proxy for Render / Cloudflare / Load Balancers
 app.set("trust proxy", 1);
 
-app.use(helmet());
-
-const clientUrl =
-  process.env.CLIENT_URL || process.env.FRONTEND_URL || "http://localhost:3000";
+// 2. Disable ETag to prevent unwanted 304 caching on API routes
+app.set("etag", false);
 
 app.use(
-  cors({
-    origin: clientUrl,
-    credentials: true,
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
   }),
 );
 
-// Socket.IO with authenticated handshake middleware.
+// 3. Multi-origin CORS setup (www, non-www and local)
+const allowedOrigins = [
+  "https://www.vexchat.io",
+  "https://vexchat.io",
+  "http://localhost:3000",
+  process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+].filter(Boolean) as string[];
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow server-to-server requests or matching origins
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+};
+
+app.use(cors(corsOptions));
+
+// 4. Disable browser caching for all dynamic API responses
+app.use("/api", (_req, res, next) => {
+  res.set({
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+  });
+  next();
+});
+
+// 5. Socket.IO initialization with robust CORS & transports
 const io = new Server<
   ClientToServerEvents,
   ServerToClientEvents,
   Record<string, never>,
   CallSocketData
 >(server, {
-  cors: {
-    origin: clientUrl,
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
+  cors: corsOptions,
+  transports: ["websocket", "polling"],
 });
 
-// Preserve exact request bytes for Meta signature verification.
+// Preserve exact request bytes for Meta webhook signature verification.
 app.use(
   express.json({
     limit: "1mb",
@@ -87,20 +117,16 @@ initCallSocket(io);
 app.use("/api/auth", authRouter);
 app.use("/api/settings", settingRouter);
 
-// Calling APIs: authentication and workspace membership are enforced
-// inside callingRoutes.
+// Calling APIs: authentication and workspace membership
 app.use("/api", callingRoutes);
 
-// Internal cron endpoint for Vercel Cron scheduler (CRON_SECRET protected).
+// Internal cron endpoint (CRON_SECRET protected).
 app.use("/api", internalCronRouter);
 
 // Workspace and billing.
 app.use("/api/workspaces", workspaceRouter);
-
 app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
-
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
-
 app.use("/api/admin/billing", platformAdminBillingRouter);
 
 // Platform administrator.
@@ -110,15 +136,14 @@ app.use("/api/platform-admin/dashboard", platformAdminDashboardRouter);
 // Invitations.
 app.use("/api/invitations", invitationRouter);
 
-// WhatsApp: mount only once.
-// Includes existing GET verification and signed POST webhook.
+// WhatsApp Webhook & APIs
 app.use("/api/whatsapp", whatsappRoutes);
 
 // Other application modules.
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/campaigns", campaignRoutes);
 
-// Root.
+// Root health & status endpoints
 app.get("/", (_req, res) => {
   res.status(200).json({
     success: true,
@@ -127,7 +152,6 @@ app.get("/", (_req, res) => {
   });
 });
 
-// Health check.
 app.get("/api/health", (_req, res) => {
   res.status(200).json({
     success: true,
@@ -136,7 +160,7 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-// Unknown routes.
+// Unknown routes handler
 app.use((_req, res) => {
   res.status(404).json({
     success: false,
