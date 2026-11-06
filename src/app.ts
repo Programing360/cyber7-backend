@@ -94,6 +94,13 @@ const io = new Server<
   transports: ["websocket", "polling"],
 });
 
+console.log("[Socket.IO] Initialized:", io.engine !== undefined);
+console.log("[Socket.IO] Path:", io.engine.opts.path);
+
+io.engine.on("connection", (connection) => {
+  console.log("[Socket.IO] Engine connected:", connection.id);
+});
+
 // Preserve exact request bytes for Meta webhook signature verification.
 app.use(
   express.json({
