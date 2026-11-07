@@ -197,15 +197,18 @@ export async function sendMetaCallRinging(
   const phoneId =
     phoneNumberId || process.env.TEST_PHONE_NUMBER_ID || "1157794877408926";
 
+  // মেটা ক্লাউড কলিং স্পেসিফিকেশনে ring অ্যাকনলেজমেন্ট পেলোড:
+  const payload = {
+    messaging_product: "whatsapp",
+    call_id: callId,
+    action: "ring",
+    status: "ring",
+  };
+
   try {
-    // মেটার WhatsApp Calling সিগন্যালিং ফরম্যাট
     await axios.post(
-      `https://graph.facebook.com/v26.0/${phoneId}/calls`,
-      {
-        messaging_product: "whatsapp",
-        call_id: callId,
-        status: "ring",
-      },
+      `https://graph.facebook.com/v21.0/${phoneId}/calls`,
+      payload,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -216,30 +219,10 @@ export async function sendMetaCallRinging(
 
     logEvent("Meta incoming call acknowledged with 'ring'", { callId });
   } catch (error: any) {
-    // যদি {phoneId}/calls কাজ না করে তবে বিকল্প কল আইডি পাথ ট্রাই করবে
-    try {
-      await axios.post(
-        `https://graph.facebook.com/v26.0/${callId}`,
-        {
-          messaging_product: "whatsapp",
-          status: "ring",
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
-      logEvent("Meta incoming call acknowledged with 'ring' (direct path)", {
-        callId,
-      });
-    } catch (fallbackError: any) {
-      console.error(
-        "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
-        error.response?.data || fallbackError.response?.data || error.message,
-      );
-    }
+    console.error(
+      "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
+      error.response?.data || error.message,
+    );
   }
 }
 
