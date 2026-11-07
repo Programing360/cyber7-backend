@@ -1,4 +1,5 @@
 import type { Types } from "mongoose";
+import axios from "axios";
 import WhatsAppAccount from "../modules/whatsapp/whatsapp.model.js";
 import Workspace from "../modules/workspace/workspace.model.js";
 import WhatsAppContact from "../modules/whatsapp/contact.model.js";
@@ -6,7 +7,10 @@ import Membership from "../modules/workspace/membership.model.js";
 import CallLog, { type CallStatus } from "../modules/Calling/CallLog.js";
 
 import User from "../modules/auth/user.model.js";
-import { enqueueCallEndedNotifications, enqueueIncomingCallNotifications } from "../modules/Calling/callNotificationOutbox.service.js";
+import {
+  enqueueCallEndedNotifications,
+  enqueueIncomingCallNotifications,
+} from "../modules/Calling/callNotificationOutbox.service.js";
 
 type CallDirection = "USER_INITIATED" | "BUSINESS_INITIATED";
 type CallType = "INCOMING" | "OUTGOING" | "MISSED";
@@ -35,6 +39,7 @@ interface WhatsAppCallEvent {
   start_time?: string;
   end_time?: string;
   session?: WhatsAppCallSession;
+  reason?: string;
 }
 
 interface WhatsAppCallStatus {
@@ -57,6 +62,8 @@ export interface WhatsAppCallingWebhookValue {
 
 interface ResolvedAccount {
   workspaceId: Types.ObjectId;
+  accessToken?: string;
+  phoneNumberId: string;
 }
 
 interface CallIdentity {
@@ -65,6 +72,7 @@ interface CallIdentity {
   callerName: string;
   callType: CallType;
   startedAt: Date;
+  phoneNumberId: string;
 }
 
 interface IncomingRecipients {
@@ -73,11 +81,15 @@ interface IncomingRecipients {
   contactId?: Types.ObjectId;
 }
 
-const TERMINAL_STATUSES: CallStatus[] = ["ENDED", "REJECTED", "MISSED", "FAILED"];
+const TERMINAL_STATUSES: CallStatus[] = [
+  "ENDED",
+  "REJECTED",
+  "MISSED",
+  "FAILED",
+];
 
 function normalizeString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
 }
@@ -86,11 +98,9 @@ function parseMetaDate(value?: string): Date | undefined {
   if (!normalizeString(value)) return undefined;
 
   const numericValue = Number(value);
-
   if (Number.isFinite(numericValue) && numericValue > 0) {
     const milliseconds =
       numericValue < 10_000_000_000 ? numericValue * 1000 : numericValue;
-
     const date = new Date(milliseconds);
     return Number.isNaN(date.getTime()) ? undefined : date;
   }
@@ -113,7 +123,6 @@ function normalizeDuration(duration?: number): number | undefined {
   ) {
     return undefined;
   }
-
   return Math.floor(duration);
 }
 
@@ -136,7 +145,6 @@ function getContactName(
   const contact = contacts?.find(
     (item) => normalizeString(item.wa_id) === phoneNumber,
   );
-
   return normalizeString(contact?.profile?.name) ?? "Unknown";
 }
 
@@ -157,6 +165,105 @@ function logInvalidEvent(reason: string): void {
   console.warn("[Calling Webhook] Event ignored:", { reason });
 }
 
+// ---------- Meta Calling Direct API Helpers ----------
+
+/**
+ * Meta-কে সাথে সাথে জানান যে এজেন্ট সফটফোন বাজছে (status: ring)।
+ * এটি মেটার ৪ সেকেন্ডের অটো-টার্মিনেশন ড্রপ হওয়া বন্ধ করে।
+ */
+export async function sendMetaCallRinging(
+  callId: string,
+  accessToken?: string,
+): Promise<void> {
+  const token =
+    accessToken ||
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN ||
+    process.env.META_ACCESS_TOKEN;
+
+  if (!token) {
+    console.warn(
+      "[Calling Webhook] Skipping Meta 'ring' ack: No valid access token found in DB or .env",
+    );
+    return;
+  }
+
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v21.0/${callId}`,
+      {
+        messaging_product: "whatsapp",
+        status: "ring",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    logEvent("Meta incoming call acknowledged with 'ring'", { callId });
+  } catch (error: any) {
+    console.error(
+      "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
+      error.response?.data || error.message,
+    );
+  }
+}
+
+/**
+ * ব্রাউজারের তৈরি WebRTC SDP Answer মেটায় পাঠিয়ে কলটি কানেক্ট করা।
+ */
+export async function acceptMetaCallWithSdp(
+  callId: string,
+  sdpAnswer: string,
+  accessToken?: string,
+): Promise<boolean> {
+  const token =
+    accessToken ||
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN ||
+    process.env.META_ACCESS_TOKEN;
+
+  if (!token) {
+    console.error(
+      "[Calling Webhook] Cannot accept call: No access token found.",
+    );
+    return false;
+  }
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v21.0/${callId}`,
+      {
+        messaging_product: "whatsapp",
+        status: "accept",
+        session: {
+          sdp_type: "answer",
+          sdp: sdpAnswer,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    return response.status === 200;
+  } catch (error: any) {
+    console.error(
+      "[Calling Webhook] Failed to accept call with Meta:",
+      error.response?.data || error.message,
+    );
+    return false;
+  }
+}
+
+// -----------------------------------------------------
+
 async function resolveWhatsAppAccount(
   phoneNumberId: string,
 ): Promise<ResolvedAccount | null> {
@@ -164,7 +271,7 @@ async function resolveWhatsAppAccount(
     phoneNumberId,
     status: "CONNECTED",
   })
-    .select("_id workspaceId")
+    .select("_id workspaceId accessToken phoneNumberId")
     .lean();
 
   if (!account?.workspaceId) return null;
@@ -178,16 +285,12 @@ async function resolveWhatsAppAccount(
 
   if (!workspace) return null;
 
-  return { workspaceId: workspace._id };
+  return {
+    workspaceId: workspace._id,
+    accessToken: (account as any).accessToken,
+    phoneNumberId,
+  };
 }
-
-/**
- * Resolve eligible incoming-call recipients.
- *
- * Priority:
- * 1. Contact's assigned ACTIVE AGENT.
- * 2. If no valid assigned agent, all ACTIVE OWNER/ADMIN members.
- */
 
 async function resolveIncomingRecipients(
   workspaceId: Types.ObjectId,
@@ -200,7 +303,7 @@ async function resolveIncomingRecipients(
     .select("_id assignedTo")
     .lean();
 
-  // Priority 1: Assigned active AGENT.
+  // Priority 1: Assigned active AGENT
   if (contact?.assignedTo) {
     const assignedMembership = await Membership.findOne({
       workspaceId,
@@ -229,7 +332,7 @@ async function resolveIncomingRecipients(
     }
   }
 
-  // Priority 2: Active OWNER/ADMIN fallback.
+  // Priority 2: Active OWNER/ADMIN fallback
   const adminMemberships = await Membership.find({
     workspaceId,
     role: { $in: ["OWNER", "ADMIN"] },
@@ -262,10 +365,6 @@ async function resolveIncomingRecipients(
   };
 }
 
-/**
- * Creates one call log per workspace/provider call ID.
- * Duplicate webhook deliveries do not create duplicate call logs.
- */
 async function ensureCallLog(
   workspaceId: Types.ObjectId,
   identity: CallIdentity,
@@ -276,6 +375,7 @@ async function ensureCallLog(
     providerCallId: identity.callId,
     callerName: identity.callerName,
     phoneNumber: identity.phoneNumber,
+    phoneNumberId: identity.phoneNumberId, // FIXED: ভবিষ্যতে মেটা কল অ্যাক্সেপ্টের জন্য সেভ রাখা হলো
     callType: identity.callType,
     status: "RINGING",
     startedAt: identity.startedAt,
@@ -367,7 +467,9 @@ async function updateNonTerminalCall(
 async function processConnectEvent(
   workspaceId: Types.ObjectId,
   event: WhatsAppCallEvent,
-  contacts?: WhatsAppCallContact[],
+  contacts: WhatsAppCallContact[] | undefined,
+  phoneNumberId: string,
+  accessToken?: string,
 ): Promise<void> {
   const callId = normalizeString(event.id);
   const direction = normalizeDirection(event.direction);
@@ -394,9 +496,13 @@ async function processConnectEvent(
     callerName,
     callType: getCallType(direction),
     startedAt: parseMetaDate(event.timestamp) ?? new Date(),
+    phoneNumberId,
   };
 
   if (direction === "USER_INITIATED") {
+    // ১. মেটাকে সবার আগে 'ring' স্ট্যাটাস পাঠিয়ে কল ড্রপ হওয়া ঠেকানো
+    void sendMetaCallRinging(callId, accessToken);
+
     const recipients = await resolveIncomingRecipients(
       workspaceId,
       phoneNumber,
@@ -404,8 +510,6 @@ async function processConnectEvent(
 
     const result = await ensureCallLog(workspaceId, identity, recipients);
 
-    // Use the recipients persisted on the original CallLog.
-    // Do not change the routing decision on webhook retries.
     const persistedCall = await CallLog.findOne({
       _id: result.callLogId,
       workspaceId,
@@ -420,13 +524,11 @@ async function processConnectEvent(
     const recipientIds = persistedCall.ringingUserIds ?? [];
 
     if (recipientIds.length === 0) {
-      logEvent("Incoming call has no eligible recipients", {
-        callId,
-      });
-
+      logEvent("Incoming call has no eligible recipients", { callId });
       return;
     }
 
+    // ২. সকেটের নোটিফিকেশনে মেটার WebRTC SDP অফার যুক্ত করা
     await enqueueIncomingCallNotifications({
       workspaceId,
       callLogId: result.callLogId,
@@ -437,6 +539,7 @@ async function processConnectEvent(
         callId,
         name: callerName,
         phone: phoneNumber,
+        sdpOffer: event.session?.sdp, // WebRTC SDP Offer
       },
     });
 
@@ -448,6 +551,7 @@ async function processConnectEvent(
 
     return;
   }
+
   await ensureCallLog(workspaceId, identity);
 
   await updateNonTerminalCall(workspaceId, callId, {
@@ -459,17 +563,11 @@ async function processConnectEvent(
   logEvent("Outgoing connect event processed");
 }
 
-/**
- * Processes Meta terminate events.
- */
-
-/**
- * Processes Meta terminate events.
- */
 async function processTerminateEvent(
   workspaceId: Types.ObjectId,
   event: WhatsAppCallEvent,
   contacts?: WhatsAppCallContact[],
+  phoneNumberId?: string,
 ): Promise<void> {
   const callId = normalizeString(event.id);
   const direction = normalizeDirection(event.direction);
@@ -487,7 +585,7 @@ async function processTerminateEvent(
     workspaceId,
     providerCallId: callId,
   })
-    .select("phoneNumber callerName startedAt status")
+    .select("phoneNumber callerName startedAt status phoneNumberId")
     .lean();
 
   const resolvedPhoneNumber = phoneNumber ?? existingCall?.phoneNumber;
@@ -514,6 +612,7 @@ async function processTerminateEvent(
     (metaStatus === "NO_ANSWER" ||
       metaStatus === "CANCELED" ||
       metaStatus === "CANCELLED" ||
+      event.reason === "timeout" ||
       (metaStatus === "COMPLETED" && duration === undefined));
 
   const callType: CallType = isUnanswered ? "MISSED" : getCallType(direction);
@@ -541,12 +640,14 @@ async function processTerminateEvent(
     callerName,
     callType,
     startedAt,
+    phoneNumberId:
+      (phoneNumberId || (existingCall as any)?.phoneNumberId) ?? "",
   };
 
   const { callLogId } = await ensureCallLog(workspaceId, identity);
 
   const update: Record<string, unknown> = {
-    status: isUnanswered ? "MISSED" : isRejected ? "REJECTED" : "ENDED",
+    status: endStatus,
     endedAt,
     callType,
     callerName,
@@ -571,10 +672,7 @@ async function processTerminateEvent(
     },
   );
 
-  // Only incoming calls need agent call-ended notifications.
   if (direction === "USER_INITIATED") {
-    // Always read the persisted recipients.
-    // This also allows webhook retries to recover failed enqueue attempts.
     const savedCall = await CallLog.findOne({
       _id: callLogId,
       workspaceId,
@@ -613,12 +711,10 @@ async function processTerminateEvent(
   });
 }
 
-/**
- * Processes business-initiated call progress statuses.
- */
 async function processCallStatus(
   workspaceId: Types.ObjectId,
   statusEvent: WhatsAppCallStatus,
+  phoneNumberId: string,
 ): Promise<void> {
   if (statusEvent.type !== "call") return;
 
@@ -646,6 +742,7 @@ async function processCallStatus(
       callerName: "Unknown",
       callType: "OUTGOING",
       startedAt: timestamp,
+      phoneNumberId,
     });
 
     await updateNonTerminalCall(workspaceId, callId, {
@@ -673,11 +770,6 @@ async function processCallStatus(
   logEvent("Unsupported call status ignored", { status });
 }
 
-/**
- * Main webhook processor.
- *
- * Tenant is resolved exclusively from Meta phone_number_id.
- */
 export async function processWhatsAppCallingWebhook(
   value: WhatsAppCallingWebhookValue,
 ): Promise<void> {
@@ -701,12 +793,23 @@ export async function processWhatsAppCallingWebhook(
     const eventName = normalizeString(event.event)?.toLowerCase();
 
     if (eventName === "connect") {
-      await processConnectEvent(account.workspaceId, event, contacts);
+      await processConnectEvent(
+        account.workspaceId,
+        event,
+        contacts,
+        phoneNumberId,
+        account.accessToken,
+      );
       continue;
     }
 
     if (eventName === "terminate") {
-      await processTerminateEvent(account.workspaceId, event, contacts);
+      await processTerminateEvent(
+        account.workspaceId,
+        event,
+        contacts,
+        phoneNumberId,
+      );
       continue;
     }
 
@@ -718,6 +821,6 @@ export async function processWhatsAppCallingWebhook(
   }
 
   for (const statusEvent of value.statuses ?? []) {
-    await processCallStatus(account.workspaceId, statusEvent);
+    await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
   }
 }

@@ -2,16 +2,18 @@ import type { Types } from "mongoose";
 
 import CallNotificationOutbox from "./CallNotificationOutbox.js";
 
-type IncomingCallPayload = {
+export type IncomingCallPayload = {
   workspaceId: string;
   callId: string;
   name: string;
   phone: string;
+  sdpOffer?: string; // FIXED: WebRTC SDP Offer ফিল্ড যুক্ত করা হলো
+  phoneNumberId?: string;
 };
 
-type CallEndedStatus = "MISSED" | "REJECTED" | "ENDED";
+export type CallEndedStatus = "MISSED" | "REJECTED" | "ENDED";
 
-type CallEndedPayload = {
+export type CallEndedPayload = {
   workspaceId: string;
   callId: string;
   endStatus: CallEndedStatus;
