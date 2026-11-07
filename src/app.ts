@@ -97,14 +97,14 @@ const io = new Server<
 // console.log("[Socket.IO] Initialized:", io.engine !== undefined);
 // console.log("[Socket.IO] Path:", io.engine.opts.path);
 
-console.log("[SOCKET DEBUG]", {
-  path: "/socket.io/",
-  attached: server.listeners("request").length,
-});
+// console.log("[SOCKET DEBUG]", {
+//   path: "/socket.io/",
+//   attached: server.listeners("request").length,
+// });
 
-io.engine.on("connection", (connection) => {
-  console.log("[Socket.IO] Engine connected:", connection.id);
-});
+// io.engine.on("connection", (connection) => {
+//   console.log("[Socket.IO] Engine connected:", connection.id);
+// });
 
 // Preserve exact request bytes for Meta webhook signature verification.
 app.use(

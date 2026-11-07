@@ -800,6 +800,47 @@ async function processCallStatus(
 
   logEvent("Unsupported call status ignored", { status });
 }
+/**
+ * মেটাতে সরাসরি কল কাটার (Terminate) রিকোয়েস্ট পাঠানো
+ */
+export async function terminateMetaCall(
+  phoneNumberId: string,
+  callId: string,
+  accessToken?: string,
+): Promise<boolean> {
+  const token =
+    accessToken ||
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!token) return false;
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
+      {
+        messaging_product: "whatsapp",
+        call_id: callId,
+        action: "terminate",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    return response.status === 200;
+  } catch (error: any) {
+    console.warn(
+      "[Calling] Meta terminate call failed/already ended:",
+      error.response?.data?.error?.message || error.message,
+    );
+    return false;
+  }
+}
 
 export async function processWhatsAppCallingWebhook(
   value: WhatsAppCallingWebhookValue,

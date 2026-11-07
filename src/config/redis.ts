@@ -18,7 +18,7 @@ export function getRedisConnection(): Redis {
 
   const redisUrl = loadRedisUrl();
 
-  console.log("[Redis] Initializing connection");
+  // console.log("[Redis] Initializing connection");
 
   const connection = new Redis(redisUrl, {
     maxRetriesPerRequest: 2,

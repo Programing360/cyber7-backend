@@ -56,10 +56,10 @@ export async function sendEmail({
       html,
     });
 
-    console.log(
-      "[MailService] Email sent successfully. Message ID:",
-      info.messageId,
-    );
+    // console.log(
+    //   "[MailService] Email sent successfully. Message ID:",
+    //   info.messageId,
+    // );
     return true;
   } catch (error) {
     console.error("[MailService] Error sending email:", error);

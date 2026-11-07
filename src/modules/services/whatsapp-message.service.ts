@@ -84,12 +84,12 @@ export async function processIncomingWhatsAppMessage({
     status: "CONNECTED",
   }).select("+accessTokenEncrypted");
 
-  console.log("[INBOUND ACCOUNT CHECK]", {
-    phoneNumberId: cleanPhoneId,
-    accountFound: Boolean(account),
-    accountStatus: account?.status,
-    workspaceId: account?.workspaceId?.toString(),
-  });
+  // console.log("[INBOUND ACCOUNT CHECK]", {
+  //   phoneNumberId: cleanPhoneId,
+  //   accountFound: Boolean(account),
+  //   accountStatus: account?.status,
+  //   workspaceId: account?.workspaceId?.toString(),
+  // });
 
   if (!account) {
     console.warn(
@@ -209,12 +209,12 @@ export async function processIncomingWhatsAppMessage({
     },
   );
 
-  console.log("[INBOUND MESSAGE SAVE]", {
-    waMessageId: message.id,
-    conversationId: conversation._id.toString(),
-    contactId: contact._id.toString(),
-    type: message.type,
-  });
+  // console.log("[INBOUND MESSAGE SAVE]", {
+  //   waMessageId: message.id,
+  //   conversationId: conversation._id.toString(),
+  //   contactId: contact._id.toString(),
+  //   type: message.type,
+  // });
 
   // 5. Save incoming message
   try {
@@ -233,10 +233,10 @@ export async function processIncomingWhatsAppMessage({
       timestamp: incomingDate,
     });
 
-    console.log("[INBOUND MESSAGE SAVED]", {
-      messageId: savedMessage._id.toString(),
-      waMessageId: savedMessage.waMessageId,
-    });
+    // console.log("[INBOUND MESSAGE SAVED]", {
+    //   messageId: savedMessage._id.toString(),
+    //   waMessageId: savedMessage.waMessageId,
+    // });
 
     return {
       duplicate: false,
@@ -433,20 +433,20 @@ export async function sendWhatsAppTextMessage({
       });
   }
 
-  console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
-    action: "SEND_TEXT_MESSAGE",
-    workspaceId: String(workspaceId),
-    phoneNumberId: account.phoneNumberId,
-    conversationId: conversation._id.toString(),
-    contactId: contact._id.toString(),
-    recipientPhoneMasked:
-      recipientPhone.length > 4
-        ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
-        : "****",
-    messageType: "text",
-    textLength: text.length,
-    hasToken: Boolean(account.accessTokenEncrypted),
-  });
+  // console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
+  //   action: "SEND_TEXT_MESSAGE",
+  //   workspaceId: String(workspaceId),
+  //   phoneNumberId: account.phoneNumberId,
+  //   conversationId: conversation._id.toString(),
+  //   contactId: contact._id.toString(),
+  //   recipientPhoneMasked:
+  //     recipientPhone.length > 4
+  //       ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
+  //       : "****",
+  //   messageType: "text",
+  //   textLength: text.length,
+  //   hasToken: Boolean(account.accessTokenEncrypted),
+  // });
 
   // 6. Send message through Meta WhatsApp Cloud API.
   const apiResponse = await makeWorkspaceWhatsAppRequest(
@@ -490,10 +490,10 @@ export async function sendWhatsAppTextMessage({
     statusUpdatedAt: undefined,
   });
 
-  console.log("[OUTBOUND MESSAGE SAVED]", {
-    messageId: savedMessage._id.toString(),
-    waMessageId: savedMessage.waMessageId,
-  });
+  // console.log("[OUTBOUND MESSAGE SAVED]", {
+  //   messageId: savedMessage._id.toString(),
+  //   waMessageId: savedMessage.waMessageId,
+  // });
 
   // 9. Update conversation activity.
   conversation.lastMessageAt = savedMessage.timestamp;
@@ -543,7 +543,7 @@ export async function sendWhatsAppTemplateMessage({
     _id: conversationObjectId,
     workspaceId: workspaceObjectId,
   });
-  console.log(conversation);
+  // console.log(conversation);
   if (!conversation) {
     throw new AppError("Conversation not found", 404);
   }
@@ -754,21 +754,21 @@ export async function sendWhatsAppTemplateMessage({
       });
   }
 
-  console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
-    action: "SEND_TEMPLATE_MESSAGE",
-    workspaceId: workspaceObjectId.toString(),
-    phoneNumberId: account.phoneNumberId,
-    conversationId: conversation._id.toString(),
-    contactId: contact._id.toString(),
-    recipientPhoneMasked:
-      recipientPhone.length > 4
-        ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
-        : "****",
-    messageType: "template",
-    templateName: template.name,
-    templateLanguage: template.language,
-    hasToken: Boolean(account.accessTokenEncrypted),
-  });
+  // console.log("[OUTBOUND WHATSAPP DIAGNOSTIC]", {
+  //   action: "SEND_TEMPLATE_MESSAGE",
+  //   workspaceId: workspaceObjectId.toString(),
+  //   phoneNumberId: account.phoneNumberId,
+  //   conversationId: conversation._id.toString(),
+  //   contactId: contact._id.toString(),
+  //   recipientPhoneMasked:
+  //     recipientPhone.length > 4
+  //       ? recipientPhone.slice(0, 4) + "****" + recipientPhone.slice(-2)
+  //       : "****",
+  //   messageType: "template",
+  //   templateName: template.name,
+  //   templateLanguage: template.language,
+  //   hasToken: Boolean(account.accessTokenEncrypted),
+  // });
 
   const apiResponse = await makeWorkspaceWhatsAppRequest(
     workspaceId,

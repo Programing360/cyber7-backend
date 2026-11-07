@@ -9,7 +9,7 @@ import { acceptMetaCallWithSdp } from "../services/whatsapp-calling-webhook.serv
 import WhatsAppAccount from "../modules/whatsapp/whatsapp.model.js";
 
 import { verifyAccessToken } from "../utils/jwt.js";
-
+ import { terminateMetaCall } from "../services/whatsapp-calling-webhook.service.js";
 export interface ServerToClientEvents {
   "call-dialing": (data: { targetPhone: string; callerName: string }) => void;
 
@@ -530,14 +530,69 @@ export const initCallSocket = (io: CallSocketServer): void => {
       }
     });
 
+   
+
+    // callSocket.ts - io.on("connection") এর ভেতরে:
     authenticatedSocket.on("hangup-call", async (data) => {
       try {
+        if (!data?.workspaceId || !data?.callId) return;
+
         const allowed = await authorizeWorkspace(
           authenticatedSocket,
-          data?.workspaceId,
+          data.workspaceId,
         );
-
         if (!allowed) return;
+
+        const query: Record<string, unknown> = {
+          workspaceId: new mongoose.Types.ObjectId(data.workspaceId),
+        };
+
+        if (isValidObjectId(data.callId)) {
+          query._id = new mongoose.Types.ObjectId(data.callId);
+        } else {
+          query.providerCallId = data.callId;
+        }
+
+        const call = await CallLog.findOne(query);
+
+        if (call && call.providerCallId) {
+          const account = await WhatsAppAccount.findOne({
+            workspaceId: call.workspaceId,
+            status: "CONNECTED",
+          })
+            .select("phoneNumberId accessToken")
+            .lean();
+
+          const phoneId =
+            call.phoneNumberId ||
+            account?.phoneNumberId ||
+            process.env.TEST_PHONE_NUMBER_ID ||
+            "1157794877408926";
+
+          const token = (account as any)?.accessToken;
+
+          // ১. মেটা ক্লাউডে কল টার্মিনেট করা (এতে হোয়াটসঅ্যাপের কল সাথে সাথে কেটে যাবে)
+          await terminateMetaCall(phoneId, call.providerCallId, token);
+
+          // ২. ডাটাবেজ আপডেট
+          call.status = "ENDED";
+          call.endedAt = new Date();
+          await call.save();
+
+          // ৩. সব এজেন্টদের সকেটে জানানো যে কল শেষ
+          const endData = {
+            notificationId: call.providerCallId,
+            workspaceId: data.workspaceId,
+            callId: call.providerCallId,
+            status: "ENDED" as const,
+          };
+
+          io.to(data.workspaceId).emit("incoming-call-ended", endData);
+          io.to(`workspace_${data.workspaceId}`).emit(
+            "incoming-call-ended",
+            endData,
+          );
+        }
       } catch (error) {
         console.error("[Call Socket] Hangup event failed:", error);
       }
