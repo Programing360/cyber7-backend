@@ -177,7 +177,9 @@ export async function sendMetaCallRinging(
 ): Promise<void> {
   console.log("[DEBUG TOKEN VALUES]:", {
     passedAccessToken: Boolean(accessToken),
-    META_SYSTEM_USER_TOKEN: Boolean(process.env.META_SYSTEM_USER_TOKEN),
+    META_SYSTEM_USER_ACCESS_TOKEN: Boolean(
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN,
+    ),
     WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
     META_ACCESS_TOKEN: Boolean(process.env.META_ACCESS_TOKEN),
     // আপনার .env-এ যে নামে টোকেন রেখেছেন তা এখানে দিন, যেমন:
@@ -186,7 +188,7 @@ export async function sendMetaCallRinging(
 
   const token =
     accessToken ||
-    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
     process.env.WHATSAPP_ACCESS_TOKEN ||
     process.env.META_ACCESS_TOKEN;
 
@@ -231,7 +233,7 @@ export async function acceptMetaCallWithSdp(
 ): Promise<boolean> {
   const token =
     accessToken ||
-    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
     process.env.WHATSAPP_ACCESS_TOKEN ||
     process.env.META_ACCESS_TOKEN;
 
