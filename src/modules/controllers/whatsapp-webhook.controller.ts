@@ -1,22 +1,21 @@
-
 import type { Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
 
 import { whatsappConfig } from "../config/whatsapp.config.js";
 import { recordWebhookVerificationSuccess } from "../whatsapp/meta-platform-config.model.js";
 
-import {
-  verifyWhatsAppWebhookSignature,
-} from "../services/whatsapp-webhook.service.js";
+import { verifyWhatsAppWebhookSignature } from "../services/whatsapp-webhook.service.js";
 
 import {
   processIncomingWhatsAppMessage,
   updateWhatsAppMessageStatus,
 } from "../services/whatsapp-message.service.js";
 
+
+
 import type { WhatsAppMessageType } from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
-
+import { processWhatsAppCallingWebhook } from "../../services/whatsapp-calling-webhook.service.js";
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -70,7 +69,11 @@ function extractTextContent(message: WebhookMessage): string | undefined {
  */
 function extractMediaId(message: WebhookMessage): string | undefined {
   const mediaPayload =
-    message.image ?? message.video ?? message.audio ?? message.document ?? message.sticker;
+    message.image ??
+    message.video ??
+    message.audio ??
+    message.document ??
+    message.sticker;
 
   return mediaPayload?.id;
 }
@@ -80,11 +83,14 @@ function extractMediaId(message: WebhookMessage): string | undefined {
  */
 function extractMediaMimeType(message: WebhookMessage): string | undefined {
   const mediaPayload =
-    message.image ?? message.video ?? message.audio ?? message.document ?? message.sticker;
+    message.image ??
+    message.video ??
+    message.audio ??
+    message.document ??
+    message.sticker;
 
   return mediaPayload?.mime_type;
 }
-
 
 // ---------- Webhook payload types ----------
 
@@ -128,6 +134,23 @@ interface WebhookMessage {
   referral?: unknown;
 }
 
+interface WebhookCall {
+  id?: string;
+  event?: string;
+  direction?: string;
+  from?: string;
+  to?: string;
+  timestamp?: string;
+  status?: string;
+  duration?: number;
+  start_time?: string;
+  end_time?: string;
+  session?: {
+    sdp_type?: string;
+    sdp?: string;
+  };
+}
+
 interface WhatsAppWebhookPayload {
   object: string;
 
@@ -150,6 +173,8 @@ interface WhatsAppWebhookPayload {
 
         messages?: WebhookMessage[];
 
+        calls?: WebhookCall[];
+
         statuses?: Array<{
           id: string;
           status: keyof typeof statusMap;
@@ -167,13 +192,15 @@ interface WhatsAppWebhookPayload {
   }>;
 }
 
-
 function safeCompareTokens(a: string, b: string): boolean {
   if (typeof a !== "string" || typeof b !== "string") return false;
   if (!a || !b) return false;
+
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
+
   if (bufA.length !== bufB.length) return false;
+
   return timingSafeEqual(bufA, bufB);
 }
 
@@ -185,25 +212,31 @@ export async function verifyWhatsAppWebhook(req: Request, res: Response) {
   const challenge = req.query["hub.challenge"];
 
   const expectedToken = whatsappConfig.webhookVerifyToken;
+
   const isValidToken =
     typeof token === "string" && safeCompareTokens(token, expectedToken);
 
-  if (
-    mode === "subscribe" &&
-    isValidToken &&
-    typeof challenge === "string"
-  ) {
+  if (mode === "subscribe" && isValidToken && typeof challenge === "string") {
     try {
       await recordWebhookVerificationSuccess(req.ip);
     } catch (err) {
-      console.error("[Webhook Verification] Failed to persist verification record:", err);
+      console.error(
+        "[Webhook Verification] Failed to persist verification record:",
+        err,
+      );
     }
+
+    if (typeof res.type === "function") {
+      res.type("text/plain");
+    } else if (typeof res.setHeader === "function") {
+      res.setHeader("Content-Type", "text/plain");
+    }
+
     return res.status(200).send(challenge);
   }
 
   return res.sendStatus(403);
 }
-
 
 // ---------- POST: Internal Webhook Audit Record ----------
 
@@ -213,12 +246,17 @@ export async function recordInternalWebhookAuditController(
 ) {
   try {
     await recordWebhookVerificationSuccess();
+
     return res.status(200).json({
       success: true,
       message: "Webhook verification recorded successfully",
     });
   } catch (error) {
-    console.error("[Internal Webhook Audit] Failed to record verification:", error);
+    console.error(
+      "[Internal Webhook Audit] Failed to record verification:",
+      error,
+    );
+
     return res.status(500).json({
       success: false,
       code: "AUDIT_PERSISTENCE_FAILED",
@@ -234,9 +272,8 @@ export async function receiveWhatsAppWebhook(
   res: Response,
 ) {
   try {
-    // 1. Verify webhook signature.
+    // 1. Verify Meta webhook signature.
     const signature = req.headers["x-hub-signature-256"];
-
     const rawBody = req.rawBody ?? Buffer.alloc(0);
 
     const isValid = verifyWhatsAppWebhookSignature(
@@ -245,7 +282,6 @@ export async function receiveWhatsAppWebhook(
     );
 
     if (!isValid) {
-      // Return 401 for invalid signature — Meta should not retry invalid payloads.
       return res.status(401).json({
         success: false,
         code: "INVALID_META_SIGNATURE",
@@ -256,19 +292,57 @@ export async function receiveWhatsAppWebhook(
     // 2. Validate webhook payload.
     const payload = req.body as WhatsAppWebhookPayload;
 
-    if (payload.object !== "whatsapp_business_account") {
-      // Return 200 for unrecognized objects to prevent retry storms.
+    if (!payload || payload.object !== "whatsapp_business_account") {
       return res.sendStatus(200);
     }
 
     // 3. Process entries and changes.
     for (const entry of payload.entry ?? []) {
       for (const change of entry.changes ?? []) {
-        if (change.field !== "messages") {
+        const value = change.value;
+
+        // 4. Process WhatsApp Calling webhook events.
+        if (change.field === "calls") {
+          const phoneNumberId = value.metadata?.phone_number_id;
+
+          if (!phoneNumberId) {
+            console.warn("[Calling Webhook] Missing metadata.phone_number_id");
+            continue;
+          }
+
+          try {
+            await processWhatsAppCallingWebhook({
+              metadata: {
+                phone_number_id: phoneNumberId,
+              },
+              contacts: value.contacts,
+              calls: value.calls,
+              // BUG-02 FIX: forward call-progress statuses so processCallStatus()
+              // can handle RINGING / ACCEPTED / REJECTED for business-initiated calls.
+              statuses: value.statuses,
+            });
+
+            console.info(
+              `[Calling Webhook] Processed call events for phoneNumberId: ${phoneNumberId}`,
+            );
+          } catch (callingError) {
+            console.error(
+              "[Calling Webhook] Failed to process call events:",
+              callingError instanceof Error
+                ? callingError.message
+                : callingError,
+            );
+
+            throw callingError;
+          }
+
           continue;
         }
 
-        const value = change.value;
+        // Ignore unsupported webhook fields.
+        if (change.field !== "messages") {
+          continue;
+        }
 
         const phoneNumberId = value.metadata?.phone_number_id;
 
@@ -276,7 +350,7 @@ export async function receiveWhatsAppWebhook(
           continue;
         }
 
-        // 4. Process incoming messages — all types.
+        // 5. Process incoming WhatsApp messages.
         for (const message of value.messages ?? []) {
           try {
             const mappedType = mapMessageType(message.type);
@@ -317,17 +391,20 @@ export async function receiveWhatsAppWebhook(
           } catch (messageError) {
             console.error(
               `[Webhook] Failed to process message ${message.id}:`,
-              messageError instanceof Error ? messageError.message : messageError,
+              messageError instanceof Error
+                ? messageError.message
+                : messageError,
             );
+
             throw messageError;
           }
         }
 
-        // 5. Process outgoing message status updates.
+        // 6. Process outgoing message status updates.
         for (const status of value.statuses ?? []) {
           try {
-            // Find connected account for status updates.
             const cleanPhoneId = phoneNumberId.trim();
+
             const account = await WhatsAppAccount.findOne({
               phoneNumberId: cleanPhoneId,
               status: "CONNECTED",
@@ -341,8 +418,7 @@ export async function receiveWhatsAppWebhook(
             }
 
             const errorMessage =
-              status.errors?.[0]?.message ??
-              status.errors?.[0]?.title;
+              status.errors?.[0]?.message ?? status.errors?.[0]?.title;
 
             await updateWhatsAppMessageStatus({
               whatsappAccountId: account._id.toString(),
@@ -356,13 +432,14 @@ export async function receiveWhatsAppWebhook(
               `[Webhook] Failed to process status ${status.id}:`,
               statusError instanceof Error ? statusError.message : statusError,
             );
+
             throw statusError;
           }
         }
       }
     }
 
-    // 6. Acknowledge webhook with 200 after durable processing.
+    // 7. Acknowledge only after processing completes.
     return res.sendStatus(200);
   } catch (error) {
     console.error(
@@ -370,7 +447,7 @@ export async function receiveWhatsAppWebhook(
       error instanceof Error ? error.message : error,
     );
 
-    // Return 500 on unexpected errors so Meta retries the webhook delivery
+    // Meta can retry failed webhook deliveries.
     return res.status(500).json({
       success: false,
       message: "Webhook processing error",

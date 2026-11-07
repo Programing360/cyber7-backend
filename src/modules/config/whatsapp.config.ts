@@ -8,6 +8,8 @@
  * 4. Return null if no valid public HTTPS URL is configured.
  * 5. Webhook callback path must match actual registered backend route (/api/whatsapp/webhook).
  */
+
+
 export function resolvePublicWebhookUrl(): string | null {
   const explicitWebhook = process.env.WEBHOOK_PUBLIC_URL?.trim();
   const publicApi = process.env.PUBLIC_API_URL?.trim();
@@ -24,6 +26,7 @@ export function resolvePublicWebhookUrl(): string | null {
       candidateUrl = `${cleanBase}/api/whatsapp/webhook`;
     }
   }
+  // console.log(candidateUrl);
 
   if (!candidateUrl) {
     return null;
@@ -31,6 +34,7 @@ export function resolvePublicWebhookUrl(): string | null {
 
   try {
     const parsed = new URL(candidateUrl);
+    // console.log(parsed);
     const isHttps = parsed.protocol === "https:";
     const hostname = parsed.hostname.toLowerCase();
     const isLocalhost =
@@ -70,6 +74,13 @@ export const whatsappConfig = {
     return `https://graph.facebook.com/${this.graphApiVersion}`;
   },
 
+  get systemUserAccessToken(): string {
+    return (
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN?.trim() ||
+      ""
+    );
+  },
+
   get isMetaAppConfigured(): boolean {
     return Boolean(
       process.env.META_APP_ID?.trim() && process.env.META_APP_SECRET?.trim(),
@@ -84,3 +95,4 @@ export const whatsappConfig = {
     return resolvePublicWebhookUrl();
   },
 };
+

@@ -1,6 +1,7 @@
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/app-error.js";
 import WhatsAppContact from "./contact.model.js";
+import WhatsAppAccount from "./whatsapp.model.js";
 import WhatsAppConversation, {
   ConversationStatus,
   isCustomerServiceWindowOpen,
@@ -133,7 +134,7 @@ export async function createOrUpsertWorkspaceContact({
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true,
       },
     );
@@ -241,7 +242,7 @@ export async function updateWorkspaceContact({
       },
       update,
       {
-        new: true,
+        returnDocument: "after",
         runValidators: true,
       },
     );
@@ -387,8 +388,13 @@ export async function listWorkspaceConversations({
   const enrichedConversations = conversations.map((conv) => ({
     ...conv,
     lastMessage: latestMessageMap.get(conv._id.toString()) || null,
-    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(conv.lastCustomerMessageAt),
-    customerServiceWindowExpiresAt: getCustomerServiceWindowExpiry(conv.lastCustomerMessageAt)?.toISOString() ?? null,
+    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(
+      conv.lastCustomerMessageAt,
+    ),
+    customerServiceWindowExpiresAt:
+      getCustomerServiceWindowExpiry(
+        conv.lastCustomerMessageAt,
+      )?.toISOString() ?? null,
   }));
 
   return {
@@ -434,8 +440,13 @@ export async function getWorkspaceConversationById({
 
   return {
     ...conversation,
-    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt),
-    customerServiceWindowExpiresAt: getCustomerServiceWindowExpiry(conversation.lastCustomerMessageAt)?.toISOString() ?? null,
+    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(
+      conversation.lastCustomerMessageAt,
+    ),
+    customerServiceWindowExpiresAt:
+      getCustomerServiceWindowExpiry(
+        conversation.lastCustomerMessageAt,
+      )?.toISOString() ?? null,
   };
 }
 
@@ -464,7 +475,7 @@ export async function updateWorkspaceConversationStatus({
       workspaceId: new Types.ObjectId(workspaceId),
     },
     { $set: { status } },
-    { new: true },
+    { returnDocument: "after" },
   )
     .populate("contactId", "profileName phoneNumber waId")
     .populate("assignedTo", "name email");
@@ -535,5 +546,99 @@ export async function listWorkspaceConversationMessages({
       total,
       totalPages,
     },
+  };
+}
+
+interface CreateOrGetConversationParams {
+  workspaceId: string;
+  contactId?: string;
+  phoneNumber?: string;
+  profileName?: string;
+}
+
+export async function createOrGetWorkspaceConversation({
+  workspaceId,
+  contactId,
+  phoneNumber,
+  profileName,
+}: CreateOrGetConversationParams) {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("A valid workspace ID is required", 400);
+  }
+  const workspaceObjectId = new Types.ObjectId(workspaceId);
+
+  // Find connected account
+  const account = await WhatsAppAccount.findOne({
+    workspaceId: workspaceObjectId,
+    status: "CONNECTED",
+  });
+  if (!account) {
+    throw new AppError("No connected WhatsApp account found in this workspace", 400);
+  }
+
+  let targetContactId: Types.ObjectId;
+
+  if (contactId) {
+    if (!Types.ObjectId.isValid(contactId)) {
+      throw new AppError("Invalid contact ID", 400);
+    }
+    const contact = await WhatsAppContact.findOne({
+      _id: new Types.ObjectId(contactId),
+      workspaceId: workspaceObjectId,
+    });
+    if (!contact) {
+      throw new AppError("Contact not found", 404);
+    }
+    targetContactId = contact._id as Types.ObjectId;
+  } else if (phoneNumber) {
+    const contact = await createOrUpsertWorkspaceContact({
+      workspaceId,
+      input: { phoneNumber, profileName },
+    });
+    targetContactId = contact._id as Types.ObjectId;
+  } else {
+    throw new AppError("Either contactId or phoneNumber is required", 400);
+  }
+
+  // Find or create conversation
+  const conversation = await WhatsAppConversation.findOneAndUpdate(
+    {
+      workspaceId: workspaceObjectId,
+      whatsappAccountId: account._id,
+      contactId: targetContactId,
+    },
+    {
+      $setOnInsert: {
+        status: "OPEN",
+        createdAt: new Date(),
+      },
+      $set: {
+        updatedAt: new Date(),
+      },
+    },
+    {
+      upsert: true,
+      returnDocument: "after",
+      setDefaultsOnInsert: true,
+    },
+  )
+    .populate("contactId", "profileName phoneNumber waId")
+    .populate("assignedTo", "name email")
+    .populate("whatsappAccountId", "businessName displayPhoneNumber")
+    .lean();
+
+  if (!conversation) {
+    throw new AppError("Failed to create conversation", 500);
+  }
+
+  return {
+    ...conversation,
+    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(
+      conversation.lastCustomerMessageAt,
+    ),
+    customerServiceWindowExpiresAt:
+      getCustomerServiceWindowExpiry(
+        conversation.lastCustomerMessageAt,
+      )?.toISOString() ?? null,
   };
 }

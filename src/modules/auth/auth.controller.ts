@@ -1,9 +1,21 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
 
-import { loginSchema, registerSchema } from "./auth.validation.js";
-import { AuthError, loginUser, registerUser } from "./auth.service.js";
-import { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+import {
+  loginSchema,
+  registerSchema,
+  updateProfileSchema,
+  changePasswordSchema,
+} from "./auth.validation.js";
+import {
+  AuthError,
+  loginUser,
+  registerUser,
+  getUserProfile,
+  updateUserProfile,
+  changeUserPassword,
+} from "./auth.service.js";
+import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
 
 export const registerController = async (
   req: Request,
@@ -58,11 +70,10 @@ export const registerController = async (
   }
 };
 
-
 export const loginController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ): Promise<void> => {
   try {
     const validation = loginSchema.safeParse(req.body);
@@ -101,25 +112,135 @@ export const loginController = async (
   }
 };
 
-// Protected profile API
-export const getCurrentUserController = (
+// Protected profile API: returns the authenticated user's full profile
+export const getCurrentUserController = async (
   req: AuthenticatedRequest,
-  res: Response
-): void => {
-  if (!req.user) {
-    res.status(401).json({
-      success: false,
-      message: "Authentication required",
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const profile = await getUserProfile(req.user.id);
+
+    res.status(200).json({
+      success: true,
+      message: "User profile retrieved successfully",
+      data: {
+        user: profile,
+      },
     });
-
-    return;
+  } catch (error: unknown) {
+    if (error instanceof AuthError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    next(error);
   }
+};
 
-  res.status(200).json({
-    success: true,
-    message: "User profile retrieved successfully",
-    data: {
-      user: req.user,
-    },
-  });
+export const getProfileController = getCurrentUserController;
+
+export const updateProfileController = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const validation = updateProfileSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+      return;
+    }
+
+    const updatedUser = await updateUserProfile(req.user.id, validation.data);
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      data: {
+        user: updatedUser,
+      },
+    });
+  } catch (error: unknown) {
+    if (error instanceof AuthError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    next(error);
+  }
+};
+
+export const changePasswordController = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    if (!req.user) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const validation = changePasswordSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+      return;
+    }
+
+    const result = await changeUserPassword(req.user.id, validation.data);
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+    });
+  } catch (error: unknown) {
+    if (error instanceof AuthError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    next(error);
+  }
 };

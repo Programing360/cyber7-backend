@@ -108,6 +108,29 @@ export const updateConversationStatusSchema = z.object({
 export type UpdateConversationStatusInput = z.infer<
   typeof updateConversationStatusSchema
 >;
+
+export const createConversationSchema = z
+  .object({
+    contactId: z
+      .string()
+      .regex(/^[0-9a-fA-F]{24}$/, { message: "Invalid contact ID" })
+      .optional(),
+    phoneNumber: z
+      .string()
+      .trim()
+      .min(7, "Phone number must be at least 7 characters")
+      .max(25, "Phone number cannot exceed 25 characters")
+      .optional(),
+    profileName: z.string().trim().max(100).optional(),
+  })
+  .refine(
+    (data) => data.contactId !== undefined || data.phoneNumber !== undefined,
+    {
+      message: "Either contactId or phoneNumber must be provided",
+    },
+  );
+
+export type CreateConversationInput = z.infer<typeof createConversationSchema>;
 export const sendWhatsAppTemplateMessageSchema = z.object({
   conversationId: z.string().regex(/^[0-9a-fA-F]{24}$/, {
     message: "Invalid conversation ID",

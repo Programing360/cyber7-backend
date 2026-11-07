@@ -2,14 +2,22 @@ import mongoose, { Schema, Document, Model } from "mongoose";
 
 export interface IWhatsAppContact extends Document {
   workspaceId: mongoose.Types.ObjectId;
+
   waId: string;
   phoneNumber: string;
   profileName?: string;
+
+  // Contact assignment.
+  assignedTo?: mongoose.Types.ObjectId;
+  assignedAt?: Date;
+
   isOptedOut: boolean;
   optOutTimestamp?: Date;
   optOutSource?: "STOP_MESSAGE" | "USER_ACTION" | "API";
+
   optInTimestamp?: Date;
   optInSource?: "START_MESSAGE" | "USER_ACTION" | "API";
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -38,6 +46,17 @@ const whatsappContactSchema = new Schema<IWhatsAppContact>(
     profileName: {
       type: String,
       trim: true,
+      maxlength: 120,
+    },
+
+    assignedTo: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: undefined,
+    },
+
+    assignedAt: {
+      type: Date,
     },
 
     isOptedOut: {
@@ -70,10 +89,30 @@ const whatsappContactSchema = new Schema<IWhatsAppContact>(
 );
 
 // A contact must be unique within a workspace.
-whatsappContactSchema.index({ workspaceId: 1, waId: 1 }, { unique: true });
+whatsappContactSchema.index(
+  {
+    workspaceId: 1,
+    waId: 1,
+  },
+  {
+    unique: true,
+    name: "unique_workspace_whatsapp_contact",
+  },
+);
+
+// Workspace + assigned agent contact lookup.
+whatsappContactSchema.index(
+  {
+    workspaceId: 1,
+    assignedTo: 1,
+  },
+  {
+    name: "workspace_assigned_contacts",
+  },
+);
 
 const WhatsAppContact: Model<IWhatsAppContact> =
-  mongoose.models.WhatsAppContact ||
+  (mongoose.models.WhatsAppContact as Model<IWhatsAppContact>) ||
   mongoose.model<IWhatsAppContact>("WhatsAppContact", whatsappContactSchema);
 
 export default WhatsAppContact;

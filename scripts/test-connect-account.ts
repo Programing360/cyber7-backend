@@ -22,10 +22,12 @@ async function main() {
   const businessAccountId = process.env.TEST_WABA_ID;
   const phoneNumberId = process.env.TEST_PHONE_NUMBER_ID;
   const displayPhoneNumber = process.env.TEST_DISPLAY_PHONE || "+1 555-211-5241";
-  const accessToken = process.env.TEST_ACCESS_TOKEN;
+  const accessToken = process.env.META_SYSTEM_USER_ACCESS_TOKEN?.trim();
 
   if (!businessAccountId || !phoneNumberId || !accessToken) {
-    console.error("Missing test credentials in .env");
+    console.error(
+      "Missing test credentials in .env (META_SYSTEM_USER_ACCESS_TOKEN, TEST_WABA_ID, TEST_PHONE_NUMBER_ID)",
+    );
     process.exit(1);
   }
 

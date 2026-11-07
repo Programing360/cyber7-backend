@@ -1,0 +1,765 @@
+import crypto from "node:crypto";
+import mongoose, { type ClientSession, type Types } from "mongoose";
+import { AppError } from "../../utils/app-error.js";
+import User from "../auth/user.model.js";
+import Workspace from "../workspace/workspace.model.js";
+import {
+  BILLING_PLANS,
+  CURRENCY,
+  type PaymentMethod,
+  type PlanCode,
+} from "./billing.config.js";
+import { invoiceService } from "./invoice.service.js";
+import Payment, { type IBankTransferDetails, type IPayment } from "./payment.model.js";
+import PaymentAuditLog, { type AuditActorType } from "./payment-audit-log.model.js";
+import Subscription, { type ISubscription } from "./subscription.model.js";
+import { subscriptionService } from "./subscription.service.js";
+
+/**
+ * Runs an atomic operation inside a MongoDB transaction.
+ *
+ * Fail-Closed Production Behavior:
+ * - In production environments (`NODE_ENV === "production"`), payment completion strictly requires a working MongoDB replica set transaction.
+ * - If session or transaction initialization fails in production, it throws an AppError and fails closed.
+ * - Silent non-transactional fallback is strictly forbidden in production.
+ * - Non-production fallback is allowed only in test/development when disconnected or running on standalone runners.
+ * - Bounded retries (up to 3 attempts with exponential backoff) are applied only for transient errors (e.g. WriteConflict).
+ */
+async function runWithTransaction<T>(
+  work: (session?: ClientSession) => Promise<T>,
+): Promise<T> {
+  const isProduction = process.env.NODE_ENV === "production";
+
+  // In non-production environments (e.g. unit tests or disconnected local runners), allow stubs to run
+  if (!isProduction && mongoose.connection.readyState !== 1) {
+    return work(undefined);
+  }
+
+  let session: ClientSession;
+  try {
+    session = await mongoose.startSession();
+  } catch (err: unknown) {
+    if (!isProduction) {
+      return work(undefined);
+    }
+    console.error("[BILLING_TRANSACTION_ERROR] Failed to start MongoDB session:", err);
+    throw new AppError(
+      "Billing service is temporarily unavailable. Please retry in a few moments.",
+      500,
+    );
+  }
+
+  try {
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+
+    while (attempt < MAX_RETRIES) {
+      attempt++;
+      try {
+        session.startTransaction();
+        const result = await work(session);
+        if (session.inTransaction()) {
+          await session.commitTransaction();
+        }
+        return result;
+      } catch (err: any) {
+        if (session.inTransaction()) {
+          try {
+            await session.abortTransaction();
+          } catch (abortErr) {
+            console.error("[BILLING_TRANSACTION_ABORT_ERROR]:", abortErr);
+          }
+        }
+
+        // Test/local fallback: if running on standalone MongoDB without replica set
+        if (!isProduction) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (
+            msg.includes("replica set member") ||
+            msg.includes("Transactions are not supported")
+          ) {
+            return work(undefined);
+          }
+        }
+
+        // Retry transient transaction errors (like WriteConflict)
+        const isTransient =
+          err?.hasErrorLabel?.("TransientTransactionError") ||
+          err?.errorLabels?.includes?.("TransientTransactionError") ||
+          err?.message?.includes("WriteConflict");
+
+        if (isTransient && attempt < MAX_RETRIES) {
+          const backoffMs = Math.min(
+            100 * Math.pow(2, attempt) + Math.random() * 50,
+            500,
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        throw err;
+      }
+    }
+
+    throw new AppError(
+      "Payment transaction could not be completed due to high concurrency. Please retry.",
+      500,
+    );
+  } finally {
+    await session.endSession();
+  }
+}
+
+export interface InitiatePaymentParams {
+  workspaceId: string | Types.ObjectId;
+  initiatedBy: string | Types.ObjectId;
+  planCode: PlanCode;
+  paymentMethod: PaymentMethod;
+  idempotencyKey?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+export interface SubmitBankTransferParams {
+  workspaceId: string | Types.ObjectId;
+  paymentId: string | Types.ObjectId;
+  userId: string | Types.ObjectId;
+  transferDetails: {
+    bankName?: string;
+    accountName?: string;
+    accountNumber?: string;
+    branchName?: string;
+    depositDate?: Date;
+    referenceNumber: string;
+    receiptUrl?: string;
+    depositAmount: number;
+  };
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+export interface CompletePaymentParams {
+  paymentId: string | Types.ObjectId;
+  completionData?: {
+    trxID?: string;
+    paymentID?: string;
+    cblOrderId?: string;
+    cblTransactionId?: string;
+    rawGatewayResponse?: Record<string, any>;
+  };
+  actor: {
+    actorType: AuditActorType;
+    actorId?: Types.ObjectId | string;
+    actorEmail?: string;
+  };
+  notes?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+export class BillingService {
+  /**
+   * Initiates a payment.
+   * - Enforces workspace-scoped idempotency lookup.
+   * - Never returns another workspace's payment.
+   * - Pulls authoritative price from BILLING_PLANS.
+   */
+  async initiatePayment(params: InitiatePaymentParams): Promise<{
+    payment: IPayment;
+    plan: (typeof BILLING_PLANS)[PlanCode];
+  }> {
+    const {
+      workspaceId,
+      initiatedBy,
+      planCode,
+      paymentMethod,
+      ipAddress,
+      userAgent,
+    } = params;
+
+    const workspace = await Workspace.findById(workspaceId);
+    if (!workspace) {
+      throw new AppError("Workspace not found", 404);
+    }
+
+    const planDef = BILLING_PLANS[planCode];
+    if (!planDef) {
+      throw new AppError(`Invalid plan code: ${planCode}`, 400);
+    }
+
+    const idempotencyKey =
+      params.idempotencyKey?.trim() ||
+      `IDEMP-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
+
+    // Fix 1: Strictly workspace-scoped idempotency check
+    const existingPayment = await Payment.findOne({
+      workspaceId,
+      idempotencyKey,
+    });
+
+    if (existingPayment) {
+      return { payment: existingPayment, plan: planDef };
+    }
+
+    const invoiceNumber = invoiceService.generateInvoiceNumber();
+
+    try {
+      const payment = await Payment.create({
+        workspaceId,
+        initiatedBy,
+        paymentMethod,
+        planCode,
+        planName: planDef.name,
+        amount: planDef.priceBdt,
+        currency: CURRENCY,
+        status: "INITIATED",
+        idempotencyKey,
+        invoiceNumber,
+      });
+
+      await PaymentAuditLog.create({
+        paymentId: payment._id,
+        workspaceId,
+        action: "PAYMENT_INITIATED",
+        actorType: "USER",
+        actorId: initiatedBy,
+        ipAddress,
+        userAgent,
+        metadata: {
+          planCode,
+          amount: planDef.priceBdt,
+          paymentMethod,
+          invoiceNumber,
+          idempotencyKey,
+        },
+      });
+
+      return { payment, plan: planDef };
+    } catch (error: any) {
+      // Safe handling of concurrent identical submissions for the same workspace
+      if (
+        error?.code === 11000 &&
+        (error?.keyPattern?.idempotencyKey ||
+          JSON.stringify(error).includes("idempotencyKey"))
+      ) {
+        const raceWinner = await Payment.findOne({
+          workspaceId,
+          idempotencyKey,
+        });
+        if (raceWinner) {
+          return { payment: raceWinner, plan: planDef };
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Submits user-provided bank transfer reference and deposit slip details.
+   * Moves payment status to PENDING_VERIFICATION.
+   */
+  async submitBankTransferDetails(
+    params: SubmitBankTransferParams,
+  ): Promise<IPayment> {
+    const {
+      workspaceId,
+      paymentId,
+      userId,
+      transferDetails,
+      ipAddress,
+      userAgent,
+    } = params;
+
+    const payment = await Payment.findOne({
+      _id: paymentId,
+      workspaceId,
+      paymentMethod: "CITY_BANK_TRANSFER",
+    });
+
+    if (!payment) {
+      throw new AppError("Bank transfer payment not found", 404);
+    }
+
+    if (payment.status !== "INITIATED") {
+      throw new AppError(
+        `Cannot submit details for payment with status ${payment.status}`,
+        400,
+      );
+    }
+
+    payment.status = "PENDING_VERIFICATION";
+    payment.gatewayData = {
+      ...(payment.gatewayData || {}),
+      bankTransfer: {
+        bankName: transferDetails.bankName,
+        accountName: transferDetails.accountName,
+        accountNumber: transferDetails.accountNumber,
+        branchName: transferDetails.branchName,
+        depositDate: transferDetails.depositDate || new Date(),
+        referenceNumber: transferDetails.referenceNumber,
+        receiptUrl: transferDetails.receiptUrl,
+        depositAmount: transferDetails.depositAmount,
+      },
+    };
+
+    await payment.save();
+
+    await PaymentAuditLog.create({
+      paymentId: payment._id,
+      workspaceId,
+      action: "TRANSFER_SUBMITTED",
+      actorType: "USER",
+      actorId: userId,
+      ipAddress,
+      userAgent,
+      metadata: {
+        referenceNumber: transferDetails.referenceNumber,
+        depositAmount: transferDetails.depositAmount,
+      },
+    });
+
+    return payment;
+  }
+
+  /**
+   * Atomically completes a payment, extends the subscription, creates an invoice,
+   * and writes audit logs. Safe against race conditions and duplicate executions.
+   */
+  async completePaymentAtomic(params: CompletePaymentParams): Promise<{
+    payment: IPayment;
+    subscription: ISubscription;
+    invoice: any;
+  }> {
+    const { paymentId, completionData, actor, notes, ipAddress, userAgent } =
+      params;
+
+    return runWithTransaction(async (session) => {
+      // Atomic conditional update: only transition from INITIATED or PENDING_VERIFICATION
+      const payment = await Payment.findOneAndUpdate(
+        {
+          _id: paymentId,
+          status: { $in: ["INITIATED", "PENDING_VERIFICATION"] },
+        },
+        {
+          $set: {
+            status: "COMPLETED",
+            completedAt: new Date(),
+            ...(completionData?.trxID
+              ? { "gatewayData.trxID": completionData.trxID }
+              : {}),
+            ...(completionData?.paymentID
+              ? { "gatewayData.paymentID": completionData.paymentID }
+              : {}),
+            ...(completionData?.cblOrderId
+              ? { "gatewayData.cblOrderId": completionData.cblOrderId }
+              : {}),
+            ...(completionData?.cblTransactionId
+              ? {
+                  "gatewayData.cblTransactionId":
+                    completionData.cblTransactionId,
+                }
+              : {}),
+            ...(completionData?.rawGatewayResponse
+              ? {
+                  "gatewayData.rawGatewayResponse":
+                    completionData.rawGatewayResponse,
+                }
+              : {}),
+          },
+        },
+        session ? { returnDocument: "after", session } : { returnDocument: "after" },
+      );
+
+      if (!payment) {
+        // If not found in eligible state, check if already completed (idempotency check)
+        const paymentLookup = Payment.findById(paymentId);
+        if (session) {
+          paymentLookup.session(session);
+        }
+        const existing = await paymentLookup;
+
+        if (!existing) {
+          throw new AppError("Payment record not found", 404);
+        }
+        if (existing.status === "COMPLETED") {
+          // Already completed: retrieve current subscription and invoice for idempotent response
+          const subLookup = Subscription.findOne({
+            workspaceId: existing.workspaceId,
+          });
+          if (session) {
+            subLookup.session(session);
+          }
+          const subscription = await subLookup;
+
+          // Fix 2: Search invoice by invoiceNumber and workspaceId, not by _id
+          const invoice = await invoiceService.getWorkspaceInvoiceByNumber(
+            existing.workspaceId,
+            existing.invoiceNumber,
+          );
+
+          if (!invoice) {
+            console.error(
+              `[BILLING_INTEGRITY_ERROR] Completed payment ${existing._id} has no invoice record (invoiceNumber: ${existing.invoiceNumber})`,
+            );
+            throw new AppError(
+              "Billing integrity error: payment marked completed but invoice record missing",
+              500,
+            );
+          }
+
+          return { payment: existing, subscription: subscription!, invoice };
+        }
+        throw new AppError(
+          `Payment cannot be completed from current status: ${existing.status}`,
+          400,
+        );
+      }
+
+      // Resolve workspace and payer for invoice details
+      const workspaceQuery = Workspace.findById(payment.workspaceId);
+      if (session) {
+        workspaceQuery.session(session);
+      }
+      const userQuery = User.findById(payment.initiatedBy);
+      if (session) {
+        userQuery.session(session);
+      }
+      const [workspace, user] = await Promise.all([workspaceQuery, userQuery]);
+
+      if (!workspace) {
+        throw new AppError("Workspace for payment not found", 404);
+      }
+
+      // Extend or activate subscription
+      const subscription = await subscriptionService.extendSubscriptionPeriod(
+        {
+          workspaceId: payment.workspaceId,
+          planCode: payment.planCode,
+          paymentId: payment._id,
+        },
+        session,
+      );
+
+      // Create paid invoice (with bounded unique collision retry inside the session)
+      const invoice = await invoiceService.createInvoice(
+        {
+          invoiceNumber: payment.invoiceNumber,
+          workspaceId: payment.workspaceId,
+          paymentId: payment._id,
+          issuedTo: {
+            userId: payment.initiatedBy,
+            userName: user?.name || "Customer",
+            userEmail: user?.email || "customer@vexchat.app",
+            workspaceName: workspace.name,
+          },
+          planCode: payment.planCode,
+          planName: payment.planName,
+          amount: payment.amount,
+          currency: payment.currency,
+          status: "PAID",
+          paymentMethod: payment.paymentMethod,
+          periodCoveredStart: subscription.currentPeriodStart,
+          periodCoveredEnd: subscription.currentPeriodEnd,
+          paidAt: payment.completedAt,
+        },
+        session,
+      );
+
+      // Audit logs
+      await PaymentAuditLog.create(
+        [
+          {
+            paymentId: payment._id,
+            workspaceId: payment.workspaceId,
+            action: "PAYMENT_COMPLETED",
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            actorEmail: actor.actorEmail,
+            ipAddress,
+            userAgent,
+            metadata: {
+              trxID: completionData?.trxID,
+              cblOrderId: completionData?.cblOrderId,
+              notes,
+            },
+          },
+          {
+            paymentId: payment._id,
+            workspaceId: payment.workspaceId,
+            action: "SUBSCRIPTION_EXTENDED",
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            actorEmail: actor.actorEmail,
+            ipAddress,
+            userAgent,
+            metadata: {
+              planCode: subscription.planCode,
+              currentPeriodStart: subscription.currentPeriodStart,
+              currentPeriodEnd: subscription.currentPeriodEnd,
+            },
+          },
+          {
+            paymentId: payment._id,
+            workspaceId: payment.workspaceId,
+            action: "INVOICE_GENERATED",
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            actorEmail: actor.actorEmail,
+            ipAddress,
+            userAgent,
+            metadata: {
+              invoiceNumber: invoice.invoiceNumber,
+              amount: invoice.amount,
+            },
+          },
+        ],
+        session ? { session } : undefined,
+      );
+
+      return { payment, subscription, invoice };
+    });
+  }
+
+  /**
+   * Approves a verified City Bank manual transfer.
+   * Restricted strictly to platform administrators.
+   */
+  async approveBankTransfer(params: {
+    paymentId: string | Types.ObjectId;
+    adminUser: { id: string; email: string };
+    adminNotes?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<{ payment: IPayment; subscription: ISubscription; invoice: any }> {
+    const { paymentId, adminUser, adminNotes, ipAddress, userAgent } = params;
+
+    const payment = await Payment.findById(paymentId);
+    if (!payment) {
+      throw new AppError("Payment not found", 404);
+    }
+
+    if (payment.paymentMethod !== "CITY_BANK_TRANSFER") {
+      throw new AppError("Payment is not a City Bank transfer", 400);
+    }
+
+    if (payment.status !== "PENDING_VERIFICATION") {
+      throw new AppError(
+        `Cannot approve bank transfer with status ${payment.status}`,
+        400,
+      );
+    }
+
+    // Set bank verification details
+    if (!payment.gatewayData) {
+      payment.gatewayData = {};
+    }
+    if (!payment.gatewayData.bankTransfer) {
+      payment.gatewayData.bankTransfer = {};
+    }
+    payment.gatewayData.bankTransfer.verifiedBy = new mongoose.Types.ObjectId(
+      adminUser.id,
+    );
+    payment.gatewayData.bankTransfer.verifiedAt = new Date();
+    payment.gatewayData.bankTransfer.adminNotes = adminNotes;
+    await payment.save();
+
+    const result = await this.completePaymentAtomic({
+      paymentId: payment._id,
+      actor: {
+        actorType: "PLATFORM_ADMIN",
+        actorId: new mongoose.Types.ObjectId(adminUser.id),
+        actorEmail: adminUser.email,
+      },
+      notes: adminNotes || "Bank transfer verified and approved by admin",
+      ipAddress,
+      userAgent,
+    });
+
+    await PaymentAuditLog.create({
+      paymentId: payment._id,
+      workspaceId: payment.workspaceId,
+      action: "TRANSFER_APPROVED",
+      actorType: "PLATFORM_ADMIN",
+      actorId: new mongoose.Types.ObjectId(adminUser.id),
+      actorEmail: adminUser.email,
+      ipAddress,
+      userAgent,
+      metadata: { adminNotes },
+    });
+
+    return result;
+  }
+
+  /**
+   * Rejects an invalid or fraudulent City Bank manual transfer.
+   * Restricted strictly to platform administrators.
+   */
+  async rejectBankTransfer(params: {
+    paymentId: string | Types.ObjectId;
+    adminUser: { id: string; email: string };
+    rejectionReason: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<IPayment> {
+    const { paymentId, adminUser, rejectionReason, ipAddress, userAgent } =
+      params;
+
+    const payment = await Payment.findById(paymentId);
+    if (!payment) {
+      throw new AppError("Payment not found", 404);
+    }
+
+    if (payment.paymentMethod !== "CITY_BANK_TRANSFER") {
+      throw new AppError("Payment is not a City Bank transfer", 400);
+    }
+
+    if (payment.status !== "PENDING_VERIFICATION") {
+      throw new AppError(
+        `Cannot reject bank transfer with status ${payment.status}`,
+        400,
+      );
+    }
+
+    payment.status = "REJECTED";
+    if (!payment.gatewayData) {
+      payment.gatewayData = {};
+    }
+    if (!payment.gatewayData.bankTransfer) {
+      payment.gatewayData.bankTransfer = {};
+    }
+    payment.gatewayData.bankTransfer.rejectionReason = rejectionReason;
+    payment.gatewayData.bankTransfer.verifiedBy = new mongoose.Types.ObjectId(
+      adminUser.id,
+    );
+    payment.gatewayData.bankTransfer.verifiedAt = new Date();
+    await payment.save();
+
+    await PaymentAuditLog.create({
+      paymentId: payment._id,
+      workspaceId: payment.workspaceId,
+      action: "TRANSFER_REJECTED",
+      actorType: "PLATFORM_ADMIN",
+      actorId: new mongoose.Types.ObjectId(adminUser.id),
+      actorEmail: adminUser.email,
+      ipAddress,
+      userAgent,
+      metadata: { rejectionReason },
+    });
+
+    return payment;
+  }
+
+  /**
+   * Marks a payment as failed.
+   */
+  async failPayment(params: {
+    paymentId: string | Types.ObjectId;
+    failureReason: string;
+    actorType?: AuditActorType;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<IPayment> {
+    const { paymentId, failureReason, actorType = "SYSTEM", ipAddress, userAgent } =
+      params;
+
+    const payment = await Payment.findById(paymentId);
+    if (!payment) {
+      throw new AppError("Payment not found", 404);
+    }
+
+    if (payment.status === "COMPLETED") {
+      throw new AppError("Cannot fail an already completed payment", 400);
+    }
+
+    payment.status = "FAILED";
+    payment.failureReason = failureReason;
+    await payment.save();
+
+    await PaymentAuditLog.create({
+      paymentId: payment._id,
+      workspaceId: payment.workspaceId,
+      action: "PAYMENT_FAILED",
+      actorType,
+      ipAddress,
+      userAgent,
+      metadata: { failureReason },
+    });
+
+    return payment;
+  }
+
+  /**
+   * Retrieves complete billing overview for a workspace.
+   */
+  async getBillingOverview(workspaceId: string | Types.ObjectId): Promise<{
+    subscription: ISubscription | null;
+    plans: (typeof BILLING_PLANS)[PlanCode][];
+    recentPayments: IPayment[];
+    recentInvoices: any[];
+    isSubscriptionActive: boolean;
+    daysRemaining: number;
+  }> {
+    const [subscription, recentPayments, recentInvoices] = await Promise.all([
+      subscriptionService.getWorkspaceSubscription(workspaceId),
+      Payment.find({ workspaceId }).sort({ createdAt: -1 }).limit(5).lean(),
+      invoiceService.getWorkspaceInvoices(workspaceId, { limit: 5 }),
+    ]);
+
+    const now = new Date();
+    let isSubscriptionActive = false;
+    let daysRemaining = 0;
+
+    if (subscription && subscription.status === "ACTIVE") {
+      const diffMs = subscription.currentPeriodEnd.getTime() - now.getTime();
+      if (diffMs > 0) {
+        isSubscriptionActive = true;
+        daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      }
+    }
+
+    return {
+      subscription,
+      plans: Object.values(BILLING_PLANS),
+      recentPayments: recentPayments as unknown as IPayment[],
+      recentInvoices: recentInvoices.invoices,
+      isSubscriptionActive,
+      daysRemaining,
+    };
+  }
+
+  /**
+   * Lists pending bank transfers for platform administrators.
+   */
+  async listPendingBankTransfers(options: {
+    page?: number;
+    limit?: number;
+  }): Promise<{ transfers: IPayment[]; total: number; page: number }> {
+    const page = Math.max(1, options.page || 1);
+    const limit = Math.min(100, Math.max(1, options.limit || 20));
+    const skip = (page - 1) * limit;
+
+    const query: Record<string, any> = {
+      paymentMethod: "CITY_BANK_TRANSFER",
+      status: "PENDING_VERIFICATION",
+    };
+
+    const [transfers, total] = await Promise.all([
+      Payment.find(query)
+        .populate("workspaceId", "name slug")
+        .populate("initiatedBy", "name email")
+        .sort({ createdAt: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Payment.countDocuments(query),
+    ]);
+
+    return {
+      transfers: transfers as unknown as IPayment[],
+      total,
+      page,
+    };
+  }
+}
+
+export const billingService = new BillingService();

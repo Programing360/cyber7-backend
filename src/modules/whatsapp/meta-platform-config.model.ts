@@ -50,6 +50,7 @@ export default MetaPlatformConfig;
 export async function recordWebhookVerificationSuccess(
   ip?: string,
 ): Promise<void> {
+  console.log("Recording webhook verification success:", { ip });
   await MetaPlatformConfig.findOneAndUpdate(
     { key: "webhook_verification" },
     {
@@ -59,7 +60,7 @@ export async function recordWebhookVerificationSuccess(
         ...(ip ? { lastVerifiedIp: ip } : {}),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
@@ -86,7 +87,6 @@ export async function resetPlatformWebhookVerification(): Promise<void> {
         lastVerifiedIp: undefined,
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
-

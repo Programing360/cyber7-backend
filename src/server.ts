@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import app from "./app.js";
+import { server } from "./app.js";
 import connectDatabase from "./config/database.js";
 import { loadCampaignEnv } from "./config/env.js";
 
@@ -11,7 +11,7 @@ const startServer = async (): Promise<void> => {
     loadCampaignEnv();
     await connectDatabase();
 
-    app.listen(PORT, () => {
+    server.listen(PORT, () => {
       console.log(`VexChat server running at http://localhost:${PORT}`);
       console.log(`Health check: http://localhost:${PORT}/api/health`);
     });

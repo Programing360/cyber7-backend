@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/phase-12a-config.test.ts tests/contact-crud.test.ts tests/campaign.test.ts tests/env-config.test.ts tests/vercel-hardening.test.ts tests/whatsapp-compliance.test.ts tests/auth-rate-limit.test.ts tests/internal-webhook-security.test.ts"
+    "test": "tsx --test --test-concurrency=1 tests/phase-12a-config.test.ts tests/contact-crud.test.ts tests/campaign.test.ts tests/env-config.test.ts tests/vercel-hardening.test.ts tests/whatsapp-compliance.test.ts tests/auth-rate-limit.test.ts tests/internal-webhook-security.test.ts tests/billing-foundation.test.ts tests/admin-session-foundation.test.ts tests/admin-mfa.test.ts tests/bff-assertion.test.ts tests/platform-admin-auth.test.ts tests/platform-admin-dashboard.test.ts tests/admin-rate-limit.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +29,8 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.11.4",
     "morgan": "^1.12.1",
+    "nodemailer": "^10.3.1",
+    "socket.io": "^4.8.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -37,6 +39,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^26.6.6",
+    "@types/nodemailer": "^8.0.2",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   }

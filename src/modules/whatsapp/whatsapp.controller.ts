@@ -6,7 +6,6 @@ import {
   getWhatsAppAccount,
   updateWhatsAppAccountStatus,
   disconnectWhatsAppAccount,
-  markWebhookVerified,
   getWhatsAppAccounts,
   getWhatsAppAccountById,
   getWhatsAppConfigStatus,
@@ -22,6 +21,7 @@ import {
   sendWhatsAppTextMessage,
   sendWhatsAppTemplateMessage,
 } from "../services/whatsapp-message.service.js";
+import { recordWebhookVerificationSuccess } from "./meta-platform-config.model.js";
 
 // ─── POST /:workspaceId/accounts ─────────────────────────────────────────────
 
@@ -161,15 +161,25 @@ export async function disconnectWhatsAppController(
 
 // ─── GET /webhook (Meta verification challenge) ───────────────────────────────
 
-export function verifyWebhookController(req: WorkspaceRequest, res: Response) {
-  const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+export async function verifyWebhookController(
+  req: WorkspaceRequest,
+  res: Response,
+) {
+  const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN;
 
   const mode = req.query["hub.mode"] as string | undefined;
   const token = req.query["hub.verify_token"] as string | undefined;
   const challenge = req.query["hub.challenge"] as string | undefined;
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    const clientIp =
+      (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress;
+
+    // ✅ ডাটাবেজে ভেরিফিকেশন সফল হিসেবে রেকর্ড করুন
+    await recordWebhookVerificationSuccess(clientIp);
+
     res.status(200).send(challenge);
+
   } else {
     res.status(403).json({
       success: false,
@@ -213,9 +223,9 @@ export async function handleWebhookController(
         if (!phoneNumberId) continue;
 
         // Mark account as connected once we receive the first real event.
-        if (!change.value?.messages && !change.value?.statuses) {
-          await markWebhookVerified(phoneNumberId);
-        }
+        // if (!change.value?.messages && !change.value?.statuses) {
+        //   await markWebhookVerified(phoneNumberId);
+        // }
 
         // TODO: route messages / status updates to conversation handlers.
       }
@@ -292,7 +302,9 @@ export async function sendWhatsAppMessage(
 
     // If templateId is provided, route to template sending
     if (req.body && typeof req.body === "object" && "templateId" in req.body) {
-      const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(req.body);
+      const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(
+        req.body,
+      );
       if (!templateValidation.success) {
         return res.status(400).json({
           success: false,
@@ -301,7 +313,8 @@ export async function sendWhatsAppMessage(
         });
       }
 
-      const { conversationId, templateId, language, components } = templateValidation.data;
+      const { conversationId, templateId, language, components } =
+        templateValidation.data;
 
       const message = await sendWhatsAppTemplateMessage({
         workspaceId,
@@ -366,7 +379,9 @@ export async function sendWhatsAppTemplateMessageController(
       throw new AppError("Workspace ID is required", 400);
     }
 
-    const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(req.body);
+    const templateValidation = sendWhatsAppTemplateMessageSchema.safeParse(
+      req.body,
+    );
     if (!templateValidation.success) {
       return res.status(400).json({
         success: false,
@@ -375,7 +390,8 @@ export async function sendWhatsAppTemplateMessageController(
       });
     }
 
-    const { conversationId, templateId, language, components } = templateValidation.data;
+    const { conversationId, templateId, language, components } =
+      templateValidation.data;
 
     const message = await sendWhatsAppTemplateMessage({
       workspaceId,
@@ -404,8 +420,7 @@ export async function getWhatsAppConfigStatusController(
   next: NextFunction,
 ) {
   try {
-    const workspaceId =
-      req.workspace?.id ?? (req.params.workspaceId as string);
+    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
 
     if (!workspaceId || typeof workspaceId !== "string") {
       throw new AppError("Workspace ID is required", 400);

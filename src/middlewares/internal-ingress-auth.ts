@@ -3,8 +3,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import InternalWebhookNonce from "../modules/whatsapp/internal-webhook-nonce.model.js";
 
 export const ALLOWED_INTERNAL_ROUTES = new Set([
-  "/api/whatsapp/webhook",
   "/api/whatsapp/internal/webhook-verified",
+  "/api/whatsapp/internal/webhook",
+  "/api/whatsapp/webhook",
 ]);
 
 const TIMESTAMP_REGEX = /^[1-9]\d{12}$/;
