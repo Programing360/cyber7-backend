@@ -201,7 +201,7 @@ export async function sendMetaCallRinging(
   const payload = {
     messaging_product: "whatsapp",
     call_id: callId,
-    action: "ring",
+    action: "pre_accept",
     status: "ring",
   };
 
@@ -230,6 +230,7 @@ export async function sendMetaCallRinging(
  * ব্রাউজারের তৈরি WebRTC SDP Answer মেটায় পাঠিয়ে কলটি কানেক্ট করা।
  */
 export async function acceptMetaCallWithSdp(
+  phoneNumberId: string,
   callId: string,
   sdpAnswer: string,
   accessToken?: string,
@@ -237,22 +238,17 @@ export async function acceptMetaCallWithSdp(
   const token =
     accessToken ||
     process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-    process.env.WHATSAPP_ACCESS_TOKEN ||
-    process.env.META_ACCESS_TOKEN;
+    process.env.META_SYSTEM_USER_TOKEN;
 
-  if (!token) {
-    console.error(
-      "[Calling Webhook] Cannot accept call: No access token found.",
-    );
-    return false;
-  }
+  if (!token) return false;
 
   try {
     const response = await axios.post(
-      `https://graph.facebook.com/v21.0/${callId}`,
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
       {
         messaging_product: "whatsapp",
-        status: "accept",
+        call_id: callId,
+        action: "accept",
         session: {
           sdp_type: "answer",
           sdp: sdpAnswer,
