@@ -5,12 +5,12 @@ import Workspace from "../modules/workspace/workspace.model.js";
 import WhatsAppContact from "../modules/whatsapp/contact.model.js";
 import Membership from "../modules/workspace/membership.model.js";
 import CallLog, { type CallStatus } from "../modules/Calling/CallLog.js";
-
 import User from "../modules/auth/user.model.js";
 import {
   enqueueCallEndedNotifications,
   enqueueIncomingCallNotifications,
 } from "../modules/Calling/callNotificationOutbox.service.js";
+import { getCallSocketIO } from "../sockets/callSocket.js";
 
 type CallDirection = "USER_INITIATED" | "BUSINESS_INITIATED";
 type CallType = "INCOMING" | "OUTGOING" | "MISSED";
@@ -165,12 +165,6 @@ function logInvalidEvent(reason: string): void {
   console.warn("[Calling Webhook] Event ignored:", { reason });
 }
 
-// ---------- Meta Calling Direct API Helpers ----------
-
-/**
- * ব্রাউজারের তৈরি WebRTC SDP Answer সহ মেটায় কল অ্যাক্সেপ্ট করা।
- * এটি callSocket.ts থেকে কল করা হয় যখন এজেন্ট অ্যান্সার করে।
- */
 export async function acceptMetaCallWithSdp(
   phoneNumberId: string,
   callId: string,
@@ -221,8 +215,6 @@ export async function acceptMetaCallWithSdp(
   }
 }
 
-// -----------------------------------------------------
-
 async function resolveWhatsAppAccount(
   phoneNumberId: string,
 ): Promise<ResolvedAccount | null> {
@@ -262,7 +254,6 @@ async function resolveIncomingRecipients(
     .select("_id assignedTo")
     .lean();
 
-  // Priority 1: Assigned active AGENT
   if (contact?.assignedTo) {
     const assignedMembership = await Membership.findOne({
       workspaceId,
@@ -291,7 +282,6 @@ async function resolveIncomingRecipients(
     }
   }
 
-  // Priority 2: Active OWNER/ADMIN fallback
   const adminMemberships = await Membership.find({
     workspaceId,
     role: { $in: ["OWNER", "ADMIN"] },
@@ -457,6 +447,7 @@ async function processConnectEvent(
     phoneNumberId,
   };
 
+  // ১. ইনকামিং কল (কাস্টমার কল করেছে)
   if (direction === "USER_INITIATED") {
     const recipients = await resolveIncomingRecipients(
       workspaceId,
@@ -483,7 +474,6 @@ async function processConnectEvent(
       return;
     }
 
-    // সকেটের মাধ্যমে ক্লায়েন্ট ব্রাউজারে মেটার WebRTC SDP অফার পাঠানো হচ্ছে
     await enqueueIncomingCallNotifications({
       workspaceId,
       callLogId: result.callLogId,
@@ -508,6 +498,7 @@ async function processConnectEvent(
     return;
   }
 
+  // ২. আউটগোয়িং কল (ব্যবসা থেকে কাস্টমারকে করা কল কাস্টমার রিসিভ করেছে)
   await ensureCallLog(workspaceId, identity);
 
   await updateNonTerminalCall(workspaceId, callId, {
@@ -516,9 +507,44 @@ async function processConnectEvent(
     status: "CONNECTED",
   });
 
-  logEvent("Outgoing connect event processed");
+  logEvent("Outgoing connect event processed", { callId });
+
+  // সকেটের মাধ্যমে ফ্রন্টএন্ড ড্যাশবোর্ডে কানেকশন ও মেটার অ্যান্সার পাঠানো
+  const io = getCallSocketIO();
+  if (io) {
+    const wsId = workspaceId.toString();
+
+    io.to(wsId).emit("call-accepted", {
+      workspaceId: wsId,
+      callId,
+      assignedTo: "",
+    });
+
+    io.to(`workspace_${wsId}`).emit("call-accepted", {
+      workspaceId: wsId,
+      callId,
+      assignedTo: "",
+    });
+
+    if (event.session?.sdp) {
+      const answerPayload = {
+        workspaceId: wsId,
+        callId,
+        sdp: {
+          type: "answer" as const,
+          sdp: event.session.sdp,
+        },
+      };
+
+      io.to(wsId).emit("webrtc-answer", answerPayload);
+      io.to(`workspace_${wsId}`).emit("webrtc-answer", answerPayload);
+    }
+  }
 }
 
+/**
+ * Processes incoming and outgoing terminate events.
+ */
 async function processTerminateEvent(
   workspaceId: Types.ObjectId,
   event: WhatsAppCallEvent,
@@ -541,7 +567,9 @@ async function processTerminateEvent(
     workspaceId,
     providerCallId: callId,
   })
-    .select("phoneNumber callerName startedAt status phoneNumberId")
+    .select(
+      "phoneNumber callerName startedAt status phoneNumberId ringingUserIds assignedTo",
+    )
     .lean();
 
   const resolvedPhoneNumber = phoneNumber ?? existingCall?.phoneNumber;
@@ -628,15 +656,11 @@ async function processTerminateEvent(
     },
   );
 
-  if (direction === "USER_INITIATED") {
-    const savedCall = await CallLog.findOne({
-      _id: callLogId,
-      workspaceId,
-    })
-      .select("ringingUserIds")
-      .lean();
+  const wsId = workspaceId.toString();
 
-    const recipientUserIds = savedCall?.ringingUserIds ?? [];
+  // ১. ইনকামিং কল টার্মিনেশন নোটিফিকেশন
+  if (direction === "USER_INITIATED") {
+    const recipientUserIds = existingCall?.ringingUserIds ?? [];
 
     if (recipientUserIds.length > 0) {
       await enqueueCallEndedNotifications({
@@ -645,7 +669,7 @@ async function processTerminateEvent(
         providerCallId: callId,
         recipientUserIds,
         payload: {
-          workspaceId: workspaceId.toString(),
+          workspaceId: wsId,
           callId,
           endStatus,
         },
@@ -659,6 +683,27 @@ async function processTerminateEvent(
     }
   }
 
+  // ২. আউটগোয়িং কল টার্মিনেশন নোটিফিকেশন (সকেটে সরাসরি পুশ)
+  const io = getCallSocketIO();
+  if (io) {
+    const endData = {
+      notificationId: callId,
+      workspaceId: wsId,
+      callId,
+      status: endStatus,
+    };
+
+    io.to(wsId).emit("incoming-call-ended", endData);
+    io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
+
+    if (existingCall?.assignedTo) {
+      io.to(`user_${existingCall.assignedTo.toString()}`).emit(
+        "incoming-call-ended",
+        endData,
+      );
+    }
+  }
+
   logEvent("Terminate event processed", {
     callType,
     status: isRejected ? "REJECTED" : "ENDED",
@@ -667,6 +712,9 @@ async function processTerminateEvent(
   });
 }
 
+/**
+ * Processes status updates (RINGING, ACCEPTED, REJECTED).
+ */
 async function processCallStatus(
   workspaceId: Types.ObjectId,
   statusEvent: WhatsAppCallStatus,
@@ -683,6 +731,8 @@ async function processCallStatus(
   }
 
   const timestamp = parseMetaDate(statusEvent.timestamp) ?? new Date();
+  const wsId = workspaceId.toString();
+  const io = getCallSocketIO();
 
   if (status === "RINGING") {
     const recipient = normalizeString(statusEvent.recipient_id);
@@ -712,6 +762,19 @@ async function processCallStatus(
     await updateNonTerminalCall(workspaceId, callId, {
       status: "CONNECTED",
     });
+
+    if (io) {
+      io.to(wsId).emit("call-accepted", {
+        workspaceId: wsId,
+        callId,
+        assignedTo: "",
+      });
+      io.to(`workspace_${wsId}`).emit("call-accepted", {
+        workspaceId: wsId,
+        callId,
+        assignedTo: "",
+      });
+    }
     return;
   }
 
@@ -720,6 +783,18 @@ async function processCallStatus(
       status: "REJECTED",
       endedAt: timestamp,
     });
+
+    if (io) {
+      const endData = {
+        notificationId: callId,
+        workspaceId: wsId,
+        callId,
+        status: "REJECTED" as const,
+      };
+
+      io.to(wsId).emit("incoming-call-ended", endData);
+      io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
+    }
     return;
   }
 
