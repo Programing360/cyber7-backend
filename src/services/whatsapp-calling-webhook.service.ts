@@ -168,66 +168,8 @@ function logInvalidEvent(reason: string): void {
 // ---------- Meta Calling Direct API Helpers ----------
 
 /**
- * Meta-কে সাথে সাথে জানান যে এজেন্ট সফটফোন বাজছে (status: ring)।
- * এটি মেটার ৪ সেকেন্ডের অটো-টার্মিনেশন ড্রপ হওয়া বন্ধ করে।
- */
-console.log("[DEBUG TOKEN VALUES]:", {
-  // passedAccessToken: Boolean(accessToken),
-  META_SYSTEM_USER_ACCESS_TOKEN: Boolean(
-    process.env.META_SYSTEM_USER_ACCESS_TOKEN,
-  ),
-  WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
-  META_ACCESS_TOKEN: Boolean(process.env.META_ACCESS_TOKEN),
-  // আপনার .env-এ যে নামে টোকেন রেখেছেন তা এখানে দিন, যেমন:
-  WHATSAPP_TOKEN: Boolean(process.env.WHATSAPP_TOKEN),
-});
-export async function sendMetaCallRinging(
-  callId: string,
-  phoneNumberId?: string,
-  accessToken?: string,
-): Promise<void> {
-  const token =
-    accessToken ||
-    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-    process.env.META_SYSTEM_USER_TOKEN ||
-    process.env.WHATSAPP_ACCESS_TOKEN;
-
-  if (!token) return;
-
-  const phoneId =
-    phoneNumberId || process.env.TEST_PHONE_NUMBER_ID || "1157794877408926";
-
-  // মেটা ক্লাউড কলিং স্পেসিফিকেশনে ring অ্যাকনলেজমেন্ট পেলোড:
-  const payload = {
-    messaging_product: "whatsapp",
-    call_id: callId,
-    action: "pre_accept",
-    status: "ring",
-  };
-
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v21.0/${phoneId}/calls`,
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    logEvent("Meta incoming call acknowledged with 'ring'", { callId });
-  } catch (error: any) {
-    console.error(
-      "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
-      error.response?.data || error.message,
-    );
-  }
-}
-
-/**
- * ব্রাউজারের তৈরি WebRTC SDP Answer মেটায় পাঠিয়ে কলটি কানেক্ট করা।
+ * ব্রাউজারের তৈরি WebRTC SDP Answer সহ মেটায় কল অ্যাক্সেপ্ট করা।
+ * এটি callSocket.ts থেকে কল করা হয় যখন এজেন্ট অ্যান্সার করে।
  */
 export async function acceptMetaCallWithSdp(
   phoneNumberId: string,
@@ -238,9 +180,15 @@ export async function acceptMetaCallWithSdp(
   const token =
     accessToken ||
     process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-    process.env.META_SYSTEM_USER_TOKEN;
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN;
 
-  if (!token) return false;
+  if (!token) {
+    console.error(
+      "[Calling Webhook] Cannot accept call: No access token found.",
+    );
+    return false;
+  }
 
   try {
     const response = await axios.post(
@@ -262,6 +210,7 @@ export async function acceptMetaCallWithSdp(
       },
     );
 
+    logEvent("Meta call accepted successfully via Graph API", { callId });
     return response.status === 200;
   } catch (error: any) {
     console.error(
@@ -385,7 +334,7 @@ async function ensureCallLog(
     providerCallId: identity.callId,
     callerName: identity.callerName,
     phoneNumber: identity.phoneNumber,
-    phoneNumberId: identity.phoneNumberId, // FIXED: ভবিষ্যতে মেটা কল অ্যাক্সেপ্টের জন্য সেভ রাখা হলো
+    phoneNumberId: identity.phoneNumberId,
     callType: identity.callType,
     status: "RINGING",
     startedAt: identity.startedAt,
@@ -479,7 +428,6 @@ async function processConnectEvent(
   event: WhatsAppCallEvent,
   contacts: WhatsAppCallContact[] | undefined,
   phoneNumberId: string,
-  accessToken?: string,
 ): Promise<void> {
   const callId = normalizeString(event.id);
   const direction = normalizeDirection(event.direction);
@@ -510,9 +458,6 @@ async function processConnectEvent(
   };
 
   if (direction === "USER_INITIATED") {
-    // ১. মেটাকে সবার আগে 'ring' স্ট্যাটাস পাঠিয়ে কল ড্রপ হওয়া ঠেকানো
-    void sendMetaCallRinging(callId, accessToken);
-
     const recipients = await resolveIncomingRecipients(
       workspaceId,
       phoneNumber,
@@ -538,7 +483,7 @@ async function processConnectEvent(
       return;
     }
 
-    // ২. সকেটের নোটিফিকেশনে মেটার WebRTC SDP অফার যুক্ত করা
+    // সকেটের মাধ্যমে ক্লায়েন্ট ব্রাউজারে মেটার WebRTC SDP অফার পাঠানো হচ্ছে
     await enqueueIncomingCallNotifications({
       workspaceId,
       callLogId: result.callLogId,
@@ -549,7 +494,8 @@ async function processConnectEvent(
         callId,
         name: callerName,
         phone: phoneNumber,
-        sdpOffer: event.session?.sdp, // WebRTC SDP Offer
+        sdpOffer: event.session?.sdp,
+        phoneNumberId,
       },
     });
 
@@ -808,7 +754,6 @@ export async function processWhatsAppCallingWebhook(
         event,
         contacts,
         phoneNumberId,
-        account.accessToken,
       );
       continue;
     }
