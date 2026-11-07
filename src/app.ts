@@ -125,14 +125,21 @@ if (process.env.NODE_ENV !== "production") {
 // Authenticated Socket.IO calling/signaling.
 initCallSocket(io);
 
-// Authentication and settings.
+// ========================================================
+// 1. PUBLIC WEBHOOKS (সবার উপরে রাখতে হবে)
+// ========================================================
+app.use("/api/whatsapp", whatsappRoutes);
+
+// ========================================================
+// 2. Authentication and Settings
+// ========================================================
 app.use("/api/auth", authRouter);
 app.use("/api/settings", settingRouter);
 
-// Calling APIs: authentication and workspace membership
+// ========================================================
+// 3. Other APIs
+// ========================================================
 app.use("/api", callingRoutes);
-
-// Internal cron endpoint (CRON_SECRET protected).
 app.use("/api", internalCronRouter);
 
 // Workspace and billing.
@@ -147,9 +154,6 @@ app.use("/api/platform-admin/dashboard", platformAdminDashboardRouter);
 
 // Invitations.
 app.use("/api/invitations", invitationRouter);
-
-// WhatsApp Webhook & APIs
-app.use("/api/whatsapp", whatsappRoutes);
 
 // Other application modules.
 app.use("/api/dashboard", dashboardRoutes);

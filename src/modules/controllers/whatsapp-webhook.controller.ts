@@ -271,7 +271,7 @@ export async function receiveWhatsAppWebhook(
 ) {
   try {
     // 1. Verify Meta webhook signature.
-
+    console.log("[Webhook] Received request with headers:", req.headers);
     const signature = req.headers["x-hub-signature-256"];
     const rawBody = req.rawBody ?? Buffer.alloc(0);
 
