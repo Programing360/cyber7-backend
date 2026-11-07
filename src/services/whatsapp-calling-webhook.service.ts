@@ -171,39 +171,39 @@ function logInvalidEvent(reason: string): void {
  * Meta-কে সাথে সাথে জানান যে এজেন্ট সফটফোন বাজছে (status: ring)।
  * এটি মেটার ৪ সেকেন্ডের অটো-টার্মিনেশন ড্রপ হওয়া বন্ধ করে।
  */
+console.log("[DEBUG TOKEN VALUES]:", {
+  // passedAccessToken: Boolean(accessToken),
+  META_SYSTEM_USER_ACCESS_TOKEN: Boolean(
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN,
+  ),
+  WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+  META_ACCESS_TOKEN: Boolean(process.env.META_ACCESS_TOKEN),
+  // আপনার .env-এ যে নামে টোকেন রেখেছেন তা এখানে দিন, যেমন:
+  WHATSAPP_TOKEN: Boolean(process.env.WHATSAPP_TOKEN),
+});
 export async function sendMetaCallRinging(
   callId: string,
+  phoneNumberId?: string,
   accessToken?: string,
 ): Promise<void> {
-  console.log("[DEBUG TOKEN VALUES]:", {
-    passedAccessToken: Boolean(accessToken),
-    META_SYSTEM_USER_ACCESS_TOKEN: Boolean(
-      process.env.META_SYSTEM_USER_ACCESS_TOKEN,
-    ),
-    WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
-    META_ACCESS_TOKEN: Boolean(process.env.META_ACCESS_TOKEN),
-    // আপনার .env-এ যে নামে টোকেন রেখেছেন তা এখানে দিন, যেমন:
-    WHATSAPP_TOKEN: Boolean(process.env.WHATSAPP_TOKEN),
-  });
-
   const token =
     accessToken ||
     process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-    process.env.WHATSAPP_ACCESS_TOKEN ||
-    process.env.META_ACCESS_TOKEN;
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN;
 
-  if (!token) {
-    console.warn(
-      "[Calling Webhook] Skipping Meta 'ring' ack: No valid access token found in DB or .env",
-    );
-    return;
-  }
+  if (!token) return;
+
+  const phoneId =
+    phoneNumberId || process.env.TEST_PHONE_NUMBER_ID || "1157794877408926";
 
   try {
+    // মেটার WhatsApp Calling সিগন্যালিং ফরম্যাট
     await axios.post(
-      `https://graph.facebook.com/v21.0/${callId}`,
+      `https://graph.facebook.com/v26.0/${phoneId}/calls`,
       {
         messaging_product: "whatsapp",
+        call_id: callId,
         status: "ring",
       },
       {
@@ -216,10 +216,30 @@ export async function sendMetaCallRinging(
 
     logEvent("Meta incoming call acknowledged with 'ring'", { callId });
   } catch (error: any) {
-    console.error(
-      "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
-      error.response?.data || error.message,
-    );
+    // যদি {phoneId}/calls কাজ না করে তবে বিকল্প কল আইডি পাথ ট্রাই করবে
+    try {
+      await axios.post(
+        `https://graph.facebook.com/v26.0/${callId}`,
+        {
+          messaging_product: "whatsapp",
+          status: "ring",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      logEvent("Meta incoming call acknowledged with 'ring' (direct path)", {
+        callId,
+      });
+    } catch (fallbackError: any) {
+      console.error(
+        "[Calling Webhook] Failed to acknowledge 'ring' with Meta:",
+        error.response?.data || fallbackError.response?.data || error.message,
+      );
+    }
   }
 }
 
