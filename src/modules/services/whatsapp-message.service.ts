@@ -82,7 +82,7 @@ export async function processIncomingWhatsAppMessage({
   const account = await WhatsAppAccount.findOne({
     phoneNumberId: cleanPhoneId,
     status: "CONNECTED",
-  });
+  }).select("+accessTokenEncrypted");
 
   console.log("[INBOUND ACCOUNT CHECK]", {
     phoneNumberId: cleanPhoneId,
@@ -396,7 +396,7 @@ export async function sendWhatsAppTextMessage({
     _id: conversation.whatsappAccountId,
     workspaceId,
     status: "CONNECTED",
-  });
+  }).select("+accessTokenEncrypted");
 
   if (!account) {
     throw new AppError("WhatsApp account not connected", 404);
@@ -571,7 +571,7 @@ export async function sendWhatsAppTemplateMessage({
     _id: conversation.whatsappAccountId,
     workspaceId: workspaceObjectId,
     status: "CONNECTED",
-  });
+  }).select("+accessTokenEncrypted");
 
   if (!account) {
     throw new AppError("WhatsApp account not connected", 404);
