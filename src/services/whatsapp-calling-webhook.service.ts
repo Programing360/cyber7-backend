@@ -504,7 +504,7 @@ async function processConnectEvent(
   await updateNonTerminalCall(workspaceId, callId, {
     callerName,
     phoneNumber,
-    status: "CONNECTED",
+    status: "RINGING",
   });
 
   logEvent("Outgoing connect event processed", { callId });
@@ -684,25 +684,25 @@ async function processTerminateEvent(
   }
 
   // ২. আউটগোয়িং কল টার্মিনেশন নোটিফিকেশন (সকেটে সরাসরি পুশ)
-  const io = getCallSocketIO();
-  if (io) {
-    const endData = {
-      notificationId: callId,
-      workspaceId: wsId,
-      callId,
-      status: endStatus,
-    };
+  // const io = getCallSocketIO();
+  // if (io) {
+  //   const endData = {
+  //     notificationId: callId,
+  //     workspaceId: wsId,
+  //     callId,
+  //     status: endStatus,
+  //   };
 
-    io.to(wsId).emit("incoming-call-ended", endData);
-    io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
+  //   io.to(wsId).emit("incoming-call-ended", endData);
+  //   io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
 
-    if (existingCall?.assignedTo) {
-      io.to(`user_${existingCall.assignedTo.toString()}`).emit(
-        "incoming-call-ended",
-        endData,
-      );
-    }
-  }
+  //   if (existingCall?.assignedTo) {
+  //     io.to(`user_${existingCall.assignedTo.toString()}`).emit(
+  //       "incoming-call-ended",
+  //       endData,
+  //     );
+  //   }
+  // }
 
   logEvent("Terminate event processed", {
     callType,
