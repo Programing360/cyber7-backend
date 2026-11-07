@@ -94,14 +94,14 @@ const io = new Server<
   transports: ["websocket", "polling"],
 });
 
-console.log("[Socket.IO] Initialized:", io.engine !== undefined);
-console.log("[Socket.IO] Path:", io.engine.opts.path);
+// console.log("[Socket.IO] Initialized:", io.engine !== undefined);
+// console.log("[Socket.IO] Path:", io.engine.opts.path);
 
 
-console.log("[SOCKET DEBUG]", {
-  path: io.engine.opts.path,
-  attached: server.listeners("request").length,
-});
+// console.log("[SOCKET DEBUG]", {
+//   path: io.engine.opts.path,
+//   attached: server.listeners("request").length,
+// });
 
 io.engine.on("connection", (connection) => {
   console.log("[Socket.IO] Engine connected:", connection.id);
