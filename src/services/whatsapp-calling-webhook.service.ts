@@ -498,7 +498,7 @@ async function processConnectEvent(
     return;
   }
 
-  // ২. আউটগোয়িং কল (ব্যবসা থেকে কাস্টমারকে করা কল কাস্টমার রিসিভ করেছে)
+  // ২. আউটগোয়িং কল (ডায়ালিং চলছে, মেটার সাথে মিডিয়া সেশন কানেক্ট হয়েছে)
   await ensureCallLog(workspaceId, identity);
 
   await updateNonTerminalCall(workspaceId, callId, {
@@ -507,26 +507,15 @@ async function processConnectEvent(
     status: "RINGING",
   });
 
-  logEvent("Outgoing connect event processed", { callId });
+  logEvent("Outgoing connect event processed (Dialing in progress)", {
+    callId,
+  });
 
-  // সকেটের মাধ্যমে ফ্রন্টএন্ড ড্যাশবোর্ডে কানেকশন ও মেটার অ্যান্সার পাঠানো
-  const io = getCallSocketIO();
-  if (io) {
-    const wsId = workspaceId.toString();
-
-    io.to(wsId).emit("call-accepted", {
-      workspaceId: wsId,
-      callId,
-      assignedTo: "",
-    });
-
-    io.to(`workspace_${wsId}`).emit("call-accepted", {
-      workspaceId: wsId,
-      callId,
-      assignedTo: "",
-    });
-
-    if (event.session?.sdp) {
+  // শুধুমাত্র WebRTC Answer SDP থাকলে ব্রাউজারে পাঠানো (কল অ্যাকসেপ্টেড নয়!)
+  if (event.session?.sdp) {
+    const io = getCallSocketIO();
+    if (io) {
+      const wsId = workspaceId.toString();
       const answerPayload = {
         workspaceId: wsId,
         callId,
@@ -536,8 +525,8 @@ async function processConnectEvent(
         },
       };
 
-      io.to(wsId).emit("webrtc-answer", answerPayload);
-      io.to(`workspace_${wsId}`).emit("webrtc-answer", answerPayload);
+      // Room chaining দিয়ে ডুপ্লিকেট ছাড়া একবারেই পাঠানো
+      io.to(wsId).to(`workspace_${wsId}`).emit("webrtc-answer", answerPayload);
     }
   }
 }
@@ -684,25 +673,25 @@ async function processTerminateEvent(
   }
 
   // ২. আউটগোয়িং কল টার্মিনেশন নোটিফিকেশন (সকেটে সরাসরি পুশ)
-  // const io = getCallSocketIO();
-  // if (io) {
-  //   const endData = {
-  //     notificationId: callId,
-  //     workspaceId: wsId,
-  //     callId,
-  //     status: endStatus,
-  //   };
+  const io = getCallSocketIO();
+  if (io) {
+    const endData = {
+      notificationId: callId,
+      workspaceId: wsId,
+      callId,
+      status: endStatus,
+    };
 
-  //   io.to(wsId).emit("incoming-call-ended", endData);
-  //   io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
+    io.to(wsId).emit("incoming-call-ended", endData);
+    io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
 
-  //   if (existingCall?.assignedTo) {
-  //     io.to(`user_${existingCall.assignedTo.toString()}`).emit(
-  //       "incoming-call-ended",
-  //       endData,
-  //     );
-  //   }
-  // }
+    if (existingCall?.assignedTo) {
+      io.to(`user_${existingCall.assignedTo.toString()}`).emit(
+        "incoming-call-ended",
+        endData,
+      );
+    }
+  }
 
   logEvent("Terminate event processed", {
     callType,
@@ -762,6 +751,8 @@ async function processCallStatus(
     await updateNonTerminalCall(workspaceId, callId, {
       status: "CONNECTED",
     });
+    
+    logEvent("Customer picked up the call on WhatsApp (status: ACCEPTED)", { callId });
 
     if (io) {
       io.to(wsId).emit("call-accepted", {
