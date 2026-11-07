@@ -1,9 +1,12 @@
 import type { Server, Socket } from "socket.io";
+import mongoose from "mongoose";
 
 import User from "../modules/auth/user.model.js";
 import Workspace from "../modules/workspace/workspace.model.js";
 import Membership from "../modules/workspace/membership.model.js";
 import CallLog from "../modules/Calling/CallLog.js";
+import { acceptMetaCallWithSdp } from "../services/whatsapp-calling-webhook.service.js";
+import WhatsAppAccount from "../modules/whatsapp/whatsapp.model.js";
 
 import { verifyAccessToken } from "../utils/jwt.js";
 
@@ -18,8 +21,12 @@ export interface ServerToClientEvents {
       phone: string;
       callSid: string;
       workspaceId: string;
+      sdpOffer?: string;
     },
-    ack: (response: { received: boolean }) => void,
+    ack?: (
+      error: Error | null,
+      response?: { received: boolean } | Array<{ received: boolean }>,
+    ) => void,
   ) => void;
 
   "call-accepted": (data: {
@@ -41,7 +48,10 @@ export interface ServerToClientEvents {
       callId: string;
       status: "MISSED" | "REJECTED" | "ENDED";
     },
-    ack: (response: { received: boolean }) => void,
+    ack?: (
+      error: Error | null,
+      response?: { received: boolean } | Array<{ received: boolean }>,
+    ) => void,
   ) => void;
 
   "webrtc-offer": (data: {
@@ -75,6 +85,7 @@ export interface ClientToServerEvents {
   "answer-incoming-call": (data: {
     workspaceId: string;
     callId: string;
+    sdpAnswer?: string;
   }) => void;
 
   "initiate-call": (data: {
@@ -126,10 +137,13 @@ const USER_ROOM_PREFIX = "user_";
 
 let callSocketIO: CallSocketServer | null = null;
 
+export const getCallSocketIO = (): CallSocketServer | null => callSocketIO;
+
 const getUserRoom = (userId: string): string => `${USER_ROOM_PREFIX}${userId}`;
 
 const getAccessToken = (socket: CallSocket): string | null => {
-  const authToken = socket.handshake.auth?.accessToken;
+  const authToken =
+    socket.handshake.auth?.accessToken || socket.handshake.auth?.token;
 
   if (typeof authToken === "string" && authToken.trim()) {
     return authToken.trim();
@@ -163,11 +177,7 @@ const isValidObjectId = (value: unknown): value is string =>
   typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
 
 /**
- * Verifies:
- * 1. Valid workspace ID.
- * 2. User still exists and is active.
- * 3. Workspace exists and is active.
- * 4. User has active membership in that workspace.
+ * Authorize workspace membership.
  */
 const authorizeWorkspace = async (
   socket: CallSocket,
@@ -203,7 +213,6 @@ const authorizeWorkspace = async (
 
   if (!activeUser) {
     emitSocketError(socket, "USER_INACTIVE", "Your account is inactive.");
-
     return false;
   }
 
@@ -213,93 +222,20 @@ const authorizeWorkspace = async (
       "WORKSPACE_ACCESS_DENIED",
       "You do not have access to this active workspace.",
     );
-
     return false;
   }
 
   return true;
 };
 
-/**
- * Sends incoming call notifications only to selected private user rooms.
- */
-
-/**
- * Legacy incoming-call emitter.
- * New Outbox delivery should use deliverIncomingCallNotification().
- */
-export function emitIncomingCallToUsers(
-  userIds: string[],
-  data: {
-    workspaceId: string;
-    callId: string;
-    name: string;
-    phone: string;
-  },
-): void {
-  if (!callSocketIO) {
-    console.error("[Call Socket] Socket.IO is not initialized.");
-    return;
-  }
-
-  const payload = {
-    notificationId: data.callId,
-    callId: data.callId,
-    callSid: data.callId,
-    workspaceId: data.workspaceId,
-    name: data.name,
-    phone: data.phone,
-  };
-
-  for (const userId of new Set(userIds)) {
-    if (!isValidObjectId(userId)) continue;
-
-    callSocketIO.to(getUserRoom(userId)).emit("incoming-call", payload, () => {
-      // Legacy acknowledgement callback.
-    });
-  }
-}
-
-/**
- * Notifies eligible users when an incoming call ends.
- */
-
-/**
- * Legacy call-ended emitter.
- * New Outbox delivery should use deliverCallEndedNotification().
- */
-export function emitIncomingCallEndedToUsers(
-  userIds: string[],
-  data: {
-    workspaceId: string;
-    callId: string;
-    status: "MISSED" | "REJECTED" | "ENDED";
-  },
-): void {
-  if (!callSocketIO) return;
-
-  const payload = {
-    notificationId: data.callId,
-    ...data,
-  };
-
-  for (const userId of new Set(userIds)) {
-    if (!isValidObjectId(userId)) continue;
-
-    callSocketIO
-      .to(getUserRoom(userId))
-      .emit("incoming-call-ended", payload, () => {
-        // Legacy acknowledgement callback.
-      });
-  }
-}
-
 type IncomingCallNotificationData = {
   notificationId: string;
   workspaceId: string;
   callId: string;
+  callSid: string;
   name: string;
   phone: string;
+  sdpOffer?: string;
 };
 
 type CallEndedNotificationData = {
@@ -312,8 +248,7 @@ type CallEndedNotificationData = {
 const SOCKET_NOTIFICATION_ACK_TIMEOUT = 5000;
 
 /**
- * Deliver an incoming-call notification to one private user room.
- * Returns true when at least one connected client acknowledges it.
+ * Deliver an incoming-call notification directly to a user's private room.
  */
 export function deliverIncomingCallNotification(
   userId: string,
@@ -324,33 +259,28 @@ export function deliverIncomingCallNotification(
   }
 
   return new Promise((resolve) => {
-    callSocketIO!
-      .to(getUserRoom(userId))
-      .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT)
-      .emit(
-        "incoming-call",
-        {
-          ...data,
-          callSid: data.callId,
-        },
-        (error, responses) => {
-          const acknowledged = (responses ?? []).some(
-            (response) => response?.received === true,
-          );
-
-          if (error && !acknowledged) {
-            resolve(false);
-            return;
-          }
-
-          resolve(acknowledged);
-        },
+    (
+      callSocketIO!
+        .to(getUserRoom(userId))
+        .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
+    ).emit("incoming-call", data, (error: any, responses: any) => {
+      const responseList = Array.isArray(responses) ? responses : [responses];
+      const acknowledged = responseList.some(
+        (response) => response?.received === true,
       );
+
+      if (error && !acknowledged) {
+        resolve(false);
+        return;
+      }
+
+      resolve(acknowledged);
+    });
   });
 }
 
 /**
- * Deliver a call-ended notification to one private user room.
+ * Deliver a call-ended notification to a user's private room.
  */
 export function deliverCallEndedNotification(
   userId: string,
@@ -361,34 +291,31 @@ export function deliverCallEndedNotification(
   }
 
   return new Promise((resolve) => {
-    callSocketIO!
-      .to(getUserRoom(userId))
-      .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT)
-      .emit("incoming-call-ended", data, (error, responses) => {
-        const acknowledged = (responses ?? []).some(
-          (response) => response?.received === true,
-        );
+    (
+      callSocketIO!
+        .to(getUserRoom(userId))
+        .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
+    ).emit("incoming-call-ended", data, (error: any, responses: any) => {
+      const responseList = Array.isArray(responses) ? responses : [responses];
+      const acknowledged = responseList.some(
+        (response) => response?.received === true,
+      );
 
-        if (error && !acknowledged) {
-          resolve(false);
-          return;
-        }
+      if (error && !acknowledged) {
+        resolve(false);
+        return;
+      }
 
-        resolve(acknowledged);
-      });
+      resolve(acknowledged);
+    });
   });
 }
 
 /**
- * Initialize authenticated Call Socket.IO.
+ * Initialize authenticated Call Socket.IO server.
  */
 export const initCallSocket = (io: CallSocketServer): void => {
   callSocketIO = io;
-
-  /**
-   * Socket authentication middleware.
-   */
-  // callSocket.ts - io.use মিডলওয়্যারে এই অংশটি আপডেট করুন:
 
   io.use(async (socket, next) => {
     try {
@@ -400,8 +327,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
       }
 
       const payload = verifyAccessToken(token) as any;
-
-      // sub, userId অথবা id — যে কোনো একটি থাকলে গ্রহণ করবে
       const userId = payload?.sub || payload?.userId || payload?.id;
 
       if (!userId || !isValidObjectId(userId)) {
@@ -428,16 +353,11 @@ export const initCallSocket = (io: CallSocketServer): void => {
 
   io.on("connection", (socket) => {
     const authenticatedSocket = socket as CallSocket;
-
     const userId = authenticatedSocket.data.userId;
 
-    // Private room for every authenticated user.
+    // Join private user room
     void authenticatedSocket.join(getUserRoom(userId));
 
-    /**
-     * Join workspace.
-     * Workspace rooms are not used for incoming call notifications.
-     */
     authenticatedSocket.on("join-workspace", async (workspaceId) => {
       try {
         const allowed = await authorizeWorkspace(
@@ -448,6 +368,7 @@ export const initCallSocket = (io: CallSocketServer): void => {
         if (!allowed) return;
 
         await authenticatedSocket.join(`workspace_${workspaceId}`);
+        await authenticatedSocket.join(workspaceId);
       } catch (error) {
         console.error("[Call Socket] Workspace join failed:", error);
 
@@ -460,24 +381,17 @@ export const initCallSocket = (io: CallSocketServer): void => {
     });
 
     /**
-     * First eligible user to answer wins.
-     *
-     * This does NOT accept the call at Meta/provider level.
-     * It only assigns the call to one eligible workspace user.
+     * Agent answers the call.
+     * WebRTC SDP Answer is forwarded to Meta Graph API.
      */
     authenticatedSocket.on("answer-incoming-call", async (data) => {
       try {
-        if (
-          !data ||
-          !isValidObjectId(data.workspaceId) ||
-          !isValidObjectId(data.callId)
-        ) {
+        if (!data || !data.workspaceId || !data.callId) {
           emitSocketError(
             authenticatedSocket,
             "INVALID_CALL_DATA",
             "A valid workspace ID and call ID are required.",
           );
-
           return;
         }
 
@@ -490,32 +404,26 @@ export const initCallSocket = (io: CallSocketServer): void => {
 
         const now = new Date();
 
-        /**
-         * Atomic first-answer-wins assignment.
-         *
-         * Transitions the call from RINGING → ASSIGNING.
-         * This records that a Cyber7 agent has claimed the call in the DB.
-         *
-         * NOTE: This does NOT accept the call at the Meta/provider level.
-         * "ASSIGNING" = Cyber7-side claim only.
-         * "CONNECTED" = real provider media confirmed (requires Meta API — NOT IMPLEMENTED).
-         */
+        // MongoDB _id অথবা providerCallId (wacid...) উভয় দিয়েই কল ম্যাচ করানো
+        const callQuery: Record<string, unknown> = {
+          workspaceId: new mongoose.Types.ObjectId(data.workspaceId),
+          status: "RINGING",
+          ringingUserIds: new mongoose.Types.ObjectId(userId),
+          $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }],
+        };
+
+        if (isValidObjectId(data.callId)) {
+          callQuery._id = new mongoose.Types.ObjectId(data.callId);
+        } else {
+          callQuery.providerCallId = data.callId;
+        }
+
         const call = await CallLog.findOneAndUpdate(
-          {
-            _id: data.callId,
-            workspaceId: data.workspaceId,
-            status: "RINGING",
-
-            // Only originally selected recipients may answer.
-            ringingUserIds: userId,
-
-            // No previous user may have won.
-            $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }],
-          },
+          callQuery,
           {
             $set: {
               status: "ASSIGNING",
-              assignedTo: userId,
+              assignedTo: new mongoose.Types.ObjectId(userId),
               assignedAt: now,
               answeredAt: now,
             },
@@ -525,7 +433,9 @@ export const initCallSocket = (io: CallSocketServer): void => {
             runValidators: true,
           },
         )
-          .select("_id workspaceId ringingUserIds assignedTo")
+          .select(
+            "_id workspaceId ringingUserIds assignedTo providerCallId phoneNumberId",
+          )
           .lean();
 
         if (!call) {
@@ -534,40 +444,65 @@ export const initCallSocket = (io: CallSocketServer): void => {
             "CALL_NOT_AVAILABLE",
             "This call is no longer available or you are not an eligible recipient.",
           );
-
           return;
         }
 
         const assignedTo = call.assignedTo?.toString() ?? userId;
+        const targetCallId = call.providerCallId || data.callId;
 
-        // Notify winning user.
+        // ব্রাউজার থেকে SDP Answer আসলে মেটাতে কল অ্যাক্সেপ্ট করা
+        if (data.sdpAnswer) {
+          const account = await WhatsAppAccount.findOne({
+            workspaceId: call.workspaceId,
+            status: "CONNECTED",
+          })
+            .select("phoneNumberId accessToken")
+            .lean();
+
+          const phoneId =
+            (call as any).phoneNumberId ||
+            account?.phoneNumberId ||
+            process.env.TEST_PHONE_NUMBER_ID ||
+            "1157794877408926";
+
+          // FIXED: accessToken টাইপ সেফ রিডিং
+          const token = (account as any)?.accessToken;
+
+          const metaSuccess = await acceptMetaCallWithSdp(
+            phoneId,
+            targetCallId,
+            data.sdpAnswer,
+            token,
+          );
+
+          if (metaSuccess) {
+            await CallLog.updateOne(
+              { _id: call._id },
+              { $set: { status: "CONNECTED" } },
+            );
+          }
+        }
+
+        // জয়ী এজেন্টকে কনফার্মেশন পাঠানো
         authenticatedSocket.emit("call-accepted", {
           workspaceId: data.workspaceId,
-          callId: data.callId,
+          callId: targetCallId,
           assignedTo,
         });
 
-        // Notify all other originally eligible recipients.
+        // অন্য সব এজেন্টদের জানানো যে কলটি রিসিভ হয়ে গেছে
         for (const recipientId of call.ringingUserIds ?? []) {
           const recipient = recipientId.toString();
-
           if (recipient === assignedTo) continue;
 
           io.to(getUserRoom(recipient)).emit("call-taken", {
             workspaceId: data.workspaceId,
-            callId: data.callId,
+            callId: targetCallId,
             assignedTo,
           });
         }
-
-        console.info("[Call Socket] Incoming call assigned:", {
-          callId: data.callId,
-          workspaceId: data.workspaceId,
-          assignedTo,
-        });
       } catch (error) {
         console.error("[Call Socket] Answer event failed:", error);
-
         emitSocketError(
           authenticatedSocket,
           "CALL_ANSWER_FAILED",
@@ -576,10 +511,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
       }
     });
 
-    /**
-     * Provider call initiation is not implemented.
-     * Browser cannot create fake provider calls.
-     */
     authenticatedSocket.on("initiate-call", async (data) => {
       try {
         const allowed = await authorizeWorkspace(
@@ -592,101 +523,13 @@ export const initCallSocket = (io: CallSocketServer): void => {
         emitSocketError(
           authenticatedSocket,
           "META_CALLING_NOT_IMPLEMENTED",
-          "Call initiation is not implemented yet.",
+          "Outgoing WhatsApp calling is not configured yet.",
         );
       } catch (error) {
         console.error("[Call Socket] Initiate event failed:", error);
-
-        emitSocketError(
-          authenticatedSocket,
-          "CALL_EVENT_FAILED",
-          "Unable to process call event.",
-        );
       }
     });
 
-    /**
-     * WebRTC signaling is intentionally disabled until
-     * actual Meta Calling media integration is implemented.
-     */
-    authenticatedSocket.on("webrtc-offer", async (data) => {
-      try {
-        const allowed = await authorizeWorkspace(
-          authenticatedSocket,
-          data?.workspaceId,
-        );
-
-        if (!allowed) return;
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_SIGNALING_NOT_AVAILABLE",
-          "WebRTC signaling is not implemented yet.",
-        );
-      } catch (error) {
-        console.error("[Call Socket] WebRTC offer failed:", error);
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_EVENT_FAILED",
-          "Unable to process WebRTC offer.",
-        );
-      }
-    });
-
-    authenticatedSocket.on("webrtc-answer", async (data) => {
-      try {
-        const allowed = await authorizeWorkspace(
-          authenticatedSocket,
-          data?.workspaceId,
-        );
-
-        if (!allowed) return;
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_SIGNALING_NOT_AVAILABLE",
-          "WebRTC signaling is not implemented yet.",
-        );
-      } catch (error) {
-        console.error("[Call Socket] WebRTC answer failed:", error);
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_EVENT_FAILED",
-          "Unable to process WebRTC answer.",
-        );
-      }
-    });
-
-    authenticatedSocket.on("webrtc-ice-candidate", async (data) => {
-      try {
-        const allowed = await authorizeWorkspace(
-          authenticatedSocket,
-          data?.workspaceId,
-        );
-
-        if (!allowed) return;
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_SIGNALING_NOT_AVAILABLE",
-          "WebRTC signaling is not implemented yet.",
-        );
-      } catch (error) {
-        console.error("[Call Socket] ICE candidate failed:", error);
-
-        emitSocketError(
-          authenticatedSocket,
-          "WEBRTC_EVENT_FAILED",
-          "Unable to process ICE candidate.",
-        );
-      }
-    });
-
-    /**
-     * Provider call termination is not implemented.
-     */
     authenticatedSocket.on("hangup-call", async (data) => {
       try {
         const allowed = await authorizeWorkspace(
@@ -695,20 +538,8 @@ export const initCallSocket = (io: CallSocketServer): void => {
         );
 
         if (!allowed) return;
-
-        emitSocketError(
-          authenticatedSocket,
-          "META_CALL_TERMINATION_NOT_IMPLEMENTED",
-          "Provider call termination is not implemented yet.",
-        );
       } catch (error) {
         console.error("[Call Socket] Hangup event failed:", error);
-
-        emitSocketError(
-          authenticatedSocket,
-          "CALL_EVENT_FAILED",
-          "Unable to process hangup event.",
-        );
       }
     });
 

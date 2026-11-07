@@ -62,9 +62,12 @@ function backoffSeconds(attempts: number): number {
  * @param batchSize Maximum records to process per invocation (default 50).
  * @returns Summary of processed, delivered, failed, and skipped counts.
  */
-export async function processCallNotificationOutbox(
-  batchSize = 50,
-): Promise<{ processed: number; delivered: number; failed: number; skipped: number }> {
+export async function processCallNotificationOutbox(batchSize = 50): Promise<{
+  processed: number;
+  delivered: number;
+  failed: number;
+  skipped: number;
+}> {
   const now = new Date();
   const leaseExpiry = new Date(now.getTime() + LEASE_DURATION_MS);
 
@@ -147,8 +150,12 @@ export async function processCallNotificationOutbox(
             notificationId: record._id.toString(),
             workspaceId: record.payload.workspaceId,
             callId: record.payload.callId,
+            callSid: record.callLogId
+              ? record.callLogId.toString()
+              : record.payload.callId,
             name: record.payload.name ?? "Unknown",
             phone: record.payload.phone ?? "",
+            sdpOffer: (record.payload as any).sdpOffer,
           },
         );
       } else if (record.eventType === "CALL_ENDED") {
@@ -205,8 +212,7 @@ export async function processCallNotificationOutbox(
         }
       }
     } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : String(err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
 
       const nextAttemptSeconds = backoffSeconds(record.attempts);
       const nextAttemptAt = new Date(Date.now() + nextAttemptSeconds * 1000);
@@ -245,4 +251,3 @@ export async function processCallNotificationOutbox(
 
   return { processed, delivered, failed, skipped };
 }
-

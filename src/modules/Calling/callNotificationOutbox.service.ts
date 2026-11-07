@@ -1,13 +1,15 @@
 import type { Types } from "mongoose";
 
 import CallNotificationOutbox from "./CallNotificationOutbox.js";
+import { deliverCallEndedNotification, deliverIncomingCallNotification } from "../../sockets/callSocket.js";
+
 
 export type IncomingCallPayload = {
   workspaceId: string;
   callId: string;
   name: string;
   phone: string;
-  sdpOffer?: string; // FIXED: WebRTC SDP Offer ফিল্ড যুক্ত করা হলো
+  sdpOffer?: string; // WebRTC SDP Offer
   phoneNumberId?: string;
 };
 
@@ -38,10 +40,7 @@ function getUniqueRecipientIds(
 }
 
 /**
- * Persist incoming-call notifications.
- *
- * The unique index prevents duplicate records for the
- * same workspace, provider call, recipient and event.
+ * Persist incoming-call notifications and instantly dispatch via Socket.IO.
  */
 export async function enqueueIncomingCallNotifications(
   params: CommonNotificationParams & {
@@ -55,6 +54,7 @@ export async function enqueueIncomingCallNotifications(
 
   const uniqueRecipientIds = getUniqueRecipientIds(recipientUserIds);
 
+  // ১. আউটবক্স ডাটাবেজে ব্যাকআপ হিসেবে সংরক্ষণ
   await CallNotificationOutbox.bulkWrite(
     uniqueRecipientIds.map((recipientUserId) => ({
       updateOne: {
@@ -84,10 +84,47 @@ export async function enqueueIncomingCallNotifications(
       ordered: false,
     },
   );
+
+  // ২. তাৎক্ষণিকভাবে কানেক্টেড ইউজারদের সকেটে ইনকামিং কল ইমিট পাঠানো
+  const socketData = {
+    notificationId: providerCallId,
+    workspaceId: workspaceId.toString(),
+    callId: providerCallId,
+    callSid: callLogId.toString(),
+    name: payload.name,
+    phone: payload.phone,
+    sdpOffer: payload.sdpOffer,
+  };
+
+  await Promise.allSettled(
+    uniqueRecipientIds.map(async (recipientUserId) => {
+      const delivered = await deliverIncomingCallNotification(
+        recipientUserId.toString(),
+        socketData,
+      );
+
+      if (delivered) {
+        await CallNotificationOutbox.updateOne(
+          {
+            workspaceId,
+            providerCallId,
+            recipientUserId,
+            eventType: "INCOMING_CALL",
+          },
+          {
+            $set: {
+              status: "DELIVERED",
+              deliveredAt: new Date(),
+            },
+          },
+        );
+      }
+    }),
+  );
 }
 
 /**
- * Persist call-ended notifications for previously eligible recipients.
+ * Persist call-ended notifications and instantly dispatch via Socket.IO.
  */
 export async function enqueueCallEndedNotifications(
   params: CommonNotificationParams & {
@@ -133,5 +170,38 @@ export async function enqueueCallEndedNotifications(
     {
       ordered: false,
     },
+  );
+
+  const socketData = {
+    notificationId: providerCallId,
+    workspaceId: workspaceId.toString(),
+    callId: providerCallId,
+    status: payload.endStatus,
+  };
+
+  await Promise.allSettled(
+    uniqueRecipientIds.map(async (recipientUserId) => {
+      const delivered = await deliverCallEndedNotification(
+        recipientUserId.toString(),
+        socketData,
+      );
+
+      if (delivered) {
+        await CallNotificationOutbox.updateOne(
+          {
+            workspaceId,
+            providerCallId,
+            recipientUserId,
+            eventType: "CALL_ENDED",
+          },
+          {
+            $set: {
+              status: "DELIVERED",
+              deliveredAt: new Date(),
+            },
+          },
+        );
+      }
+    }),
   );
 }
