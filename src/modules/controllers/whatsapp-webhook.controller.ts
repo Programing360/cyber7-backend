@@ -11,8 +11,6 @@ import {
   updateWhatsAppMessageStatus,
 } from "../services/whatsapp-message.service.js";
 
-
-
 import type { WhatsAppMessageType } from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import { processWhatsAppCallingWebhook } from "../../services/whatsapp-calling-webhook.service.js";
@@ -273,8 +271,20 @@ export async function receiveWhatsAppWebhook(
 ) {
   try {
     // 1. Verify Meta webhook signature.
+
     const signature = req.headers["x-hub-signature-256"];
     const rawBody = req.rawBody ?? Buffer.alloc(0);
+
+    console.info("[Webhook Signature Debug]", {
+      rawBodyCaptured: Buffer.isBuffer(req.rawBody),
+      rawBodyLength: rawBody.length,
+      signaturePresent: typeof signature === "string",
+      signatureFormatValid:
+        typeof signature === "string" &&
+        /^sha256=[a-fA-F0-9]{64}$/.test(signature),
+      appSecretConfigured: Boolean(process.env.META_APP_SECRET?.trim()),
+      contentType: req.headers["content-type"],
+    });
 
     const isValid = verifyWhatsAppWebhookSignature(
       rawBody,
