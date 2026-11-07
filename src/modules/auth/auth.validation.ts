@@ -24,6 +24,50 @@ export const registerSchema = z
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 
+export const sendSignupOtpSchema = z
+  .object({
+    email: z
+      .string()
+      .trim()
+      .email("Please provide a valid email address")
+      .max(254, "Email is too long")
+      .transform((email) => email.toLowerCase()),
+  })
+  .strict();
+
+export type SendSignupOtpInput = z.infer<typeof sendSignupOtpSchema>;
+
+export const verifySignupOtpSchema = z
+  .object({
+    email: z
+      .string()
+      .trim()
+      .email("Please provide a valid email address")
+      .max(254, "Email is too long")
+      .transform((email) => email.toLowerCase()),
+
+    otp: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/, "Verification code must be exactly 6 digits"),
+
+    name: z
+      .string()
+      .trim()
+      .min(2, "Name must be at least 2 characters")
+      .max(100, "Name cannot exceed 100 characters")
+      .optional(),
+
+    password: z
+      .string()
+      .min(8, "Password must be at least 8 characters")
+      .max(72, "Password is too long for this password-hashing configuration")
+      .optional(),
+  })
+  .strict();
+
+export type VerifySignupOtpInput = z.infer<typeof verifySignupOtpSchema>;
+
 
 export const loginSchema = z
   .object({

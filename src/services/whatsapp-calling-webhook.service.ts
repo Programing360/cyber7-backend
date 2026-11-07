@@ -175,6 +175,15 @@ export async function sendMetaCallRinging(
   callId: string,
   accessToken?: string,
 ): Promise<void> {
+  console.log("[DEBUG TOKEN VALUES]:", {
+    passedAccessToken: Boolean(accessToken),
+    META_SYSTEM_USER_TOKEN: Boolean(process.env.META_SYSTEM_USER_TOKEN),
+    WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+    META_ACCESS_TOKEN: Boolean(process.env.META_ACCESS_TOKEN),
+    // আপনার .env-এ যে নামে টোকেন রেখেছেন তা এখানে দিন, যেমন:
+    WHATSAPP_TOKEN: Boolean(process.env.WHATSAPP_TOKEN),
+  });
+
   const token =
     accessToken ||
     process.env.META_SYSTEM_USER_TOKEN ||

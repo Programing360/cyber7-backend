@@ -4,6 +4,8 @@ import { ZodError } from "zod";
 import {
   loginSchema,
   registerSchema,
+  sendSignupOtpSchema,
+  verifySignupOtpSchema,
   updateProfileSchema,
   changePasswordSchema,
 } from "./auth.validation.js";
@@ -11,11 +13,113 @@ import {
   AuthError,
   loginUser,
   registerUser,
+  sendSignupOtp,
+  verifySignupOtp,
   getUserProfile,
   updateUserProfile,
   changeUserPassword,
 } from "./auth.service.js";
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+
+export const sendSignupOtpController = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const validation = sendSignupOtpSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+
+      return;
+    }
+
+    const result = await sendSignupOtp(validation.data);
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+    });
+  } catch (error: unknown) {
+    if (error instanceof AuthError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+
+      return;
+    }
+
+    if (error instanceof ZodError) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid input",
+      });
+
+      return;
+    }
+
+    next(error);
+  }
+};
+
+export const verifySignupOtpController = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const validation = verifySignupOtpSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+
+      return;
+    }
+
+    const result = await verifySignupOtp(validation.data);
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    });
+  } catch (error: unknown) {
+    if (error instanceof AuthError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+
+      return;
+    }
+
+    if (error instanceof ZodError) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid input",
+      });
+
+      return;
+    }
+
+    next(error);
+  }
+};
 
 export const registerController = async (
   req: Request,

@@ -7,9 +7,17 @@ import type { WorkspaceRequest } from "../../middlewares/require-workspace-membe
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const formatDuration = (seconds: number): string | undefined => {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return undefined;
+/**
+ * Format duration safely.
+ * Returns "00:00" or formatted time string instead of undefined.
+ */
+const formatDuration = (seconds?: number | null): string => {
+  if (
+    typeof seconds !== "number" ||
+    !Number.isFinite(seconds) ||
+    seconds <= 0
+  ) {
+    return "00:00";
   }
 
   const safeSeconds = Math.floor(seconds);
@@ -21,12 +29,23 @@ const formatDuration = (seconds: number): string | undefined => {
   ).padStart(2, "0")}`;
 };
 
+/**
+ * Safely format Date to ISO string without throwing RangeError.
+ */
+const safeToISOString = (date?: Date | string | null): string | null => {
+  if (!date) return null;
+  const d = date instanceof Date ? date : new Date(date);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+
 export const getCallLogs = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
   try {
-    const workspaceId = req.workspace?.id;
+    // 1. Safe workspace ID check (_id or id fallback)
+    const rawWorkspaceId = req.workspace?.id;
+    const workspaceId = rawWorkspaceId ? String(rawWorkspaceId) : undefined;
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -36,22 +55,22 @@ export const getCallLogs = async (
       });
     }
 
-    const rawFilter = req.query.filter;
-    const rawSearch = req.query.search;
+    const { filter, search, page = "1", limit = "50" } = req.query;
 
+    const allowedFilters = ["ALL", "MISSED", "INCOMING", "OUTGOING"];
     if (
-      rawFilter !== undefined &&
-      rawFilter !== "ALL" &&
-      rawFilter !== "MISSED"
+      filter !== undefined &&
+      !allowedFilters.includes(String(filter).toUpperCase())
     ) {
       return res.status(400).json({
         success: false,
         code: "INVALID_CALL_FILTER",
-        message: "Invalid call filter.",
+        message:
+          "Invalid call filter. Allowed: ALL, MISSED, INCOMING, OUTGOING",
       });
     }
 
-    if (rawSearch !== undefined && typeof rawSearch !== "string") {
+    if (search !== undefined && typeof search !== "string") {
       return res.status(400).json({
         success: false,
         code: "INVALID_CALL_SEARCH",
@@ -59,79 +78,86 @@ export const getCallLogs = async (
       });
     }
 
+    // 2. Build Query
     const query: Record<string, unknown> = {
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
     };
 
-    if (rawFilter === "MISSED") {
+    const upperFilter =
+      typeof filter === "string" ? filter.toUpperCase() : "ALL";
+    if (upperFilter === "MISSED") {
       query.callType = "MISSED";
+    } else if (upperFilter === "INCOMING") {
+      query.callType = "INCOMING";
+    } else if (upperFilter === "OUTGOING") {
+      query.callType = "OUTGOING";
     }
 
-    if (typeof rawSearch === "string" && rawSearch.trim()) {
-      const safeSearch = escapeRegex(rawSearch.trim().slice(0, 80));
-
+    if (typeof search === "string" && search.trim()) {
+      const safeSearch = escapeRegex(search.trim().slice(0, 80));
       query.$or = [
-        {
-          callerName: {
-            $regex: safeSearch,
-            $options: "i",
-          },
-        },
-        {
-          phoneNumber: {
-            $regex: safeSearch,
-            $options: "i",
-          },
-        },
+        { callerName: { $regex: safeSearch, $options: "i" } },
+        { phoneNumber: { $regex: safeSearch, $options: "i" } },
       ];
     }
 
-    const logs = await CallLog.find(query)
-      .sort({
-        startedAt: -1,
-        _id: -1,
-      })
-      .limit(50)
-      .select(
-        [
-          "_id",
-          "callerName",
-          "phoneNumber",
-          "callType",
-          "status",
-          "providerCallId",
-          "callSid",
-          "durationSeconds",
-          "startedAt",
-          "endedAt",
-          "createdAt",
-        ].join(" "),
-      )
-      .lean();
+    // 3. Pagination Support
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.min(
+      100,
+      Math.max(1, parseInt(String(limit), 10) || 50),
+    );
+    const skip = (pageNum - 1) * limitNum;
+
+    const [logs, totalCount] = await Promise.all([
+      CallLog.find(query)
+        .sort({ startedAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .select(
+          [
+            "_id",
+            "callerName",
+            "phoneNumber",
+            "callType",
+            "status",
+            "providerCallId",
+            "callSid",
+            "durationSeconds",
+            "startedAt",
+            "endedAt",
+            "createdAt",
+          ].join(" "),
+        )
+        .lean(),
+      CallLog.countDocuments(query),
+    ]);
 
     return res.status(200).json({
       success: true,
+      meta: {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      },
       data: logs.map((log) => ({
         id: log._id.toString(),
-        name: log.callerName,
+        name: log.callerName || "Unknown",
         phone: log.phoneNumber,
         type: log.callType,
         status: log.status,
-
         providerCallId: log.providerCallId ?? null,
-
-        // Legacy compatibility only.
         callSid: log.callSid ?? null,
-
-        startedAt: log.startedAt,
-        endedAt: log.endedAt,
-        timestamp: log.startedAt?.toISOString(),
+        startedAt: log.startedAt ?? null,
+        endedAt: log.endedAt ?? null,
+        timestamp: safeToISOString(log.startedAt),
         duration: formatDuration(log.durationSeconds),
+        durationSeconds: log.durationSeconds ?? 0,
       })),
     });
   } catch (error) {
     console.error("[Calling] Get call logs failed:", error);
-
     return res.status(500).json({
       success: false,
       code: "CALL_LOG_FETCH_FAILED",
@@ -143,9 +169,6 @@ export const getCallLogs = async (
 /**
  * Outgoing calls remain disabled until the actual
  * Meta Calling API integration is implemented.
- *
- * This endpoint intentionally does not create a fake
- * CallLog or emit a fake call event.
  */
 export const startOutgoingCall = async (
   _req: WorkspaceRequest,
@@ -160,10 +183,7 @@ export const startOutgoingCall = async (
 };
 
 /**
- * Call termination must be handled through the actual
- * provider call lifecycle.
- *
- * Client-supplied status and duration are never trusted.
+ * Call termination endpoint.
  */
 export const endCallSession = async (
   _req: WorkspaceRequest,

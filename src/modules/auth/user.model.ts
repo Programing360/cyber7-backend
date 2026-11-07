@@ -52,8 +52,8 @@ const userSchema = new Schema(
 
     role: {
       type: String,
-      enum: ["OWNER", "ADMIN", "AGENT"],
-      default: "OWNER",
+      enum: ["user", "USER", "OWNER", "ADMIN", "AGENT"],
+      default: "user",
     },
 
     platformRole: {
@@ -63,6 +63,27 @@ const userSchema = new Schema(
     },
 
     isEmailVerified: {
+      type: Boolean,
+      default: false,
+    },
+
+    subscriptionStatus: {
+      type: String,
+      enum: ["trial", "active", "expired", "cancelled"],
+      default: "trial",
+    },
+
+    trialStartDate: {
+      type: Date,
+      default: Date.now,
+    },
+
+    trialEndDate: {
+      type: Date,
+      default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    },
+
+    isPaid: {
       type: Boolean,
       default: false,
     },
