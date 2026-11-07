@@ -53,6 +53,9 @@ export interface ICallLog {
   // Provider call identity.
   providerCallId?: string;
 
+  // Meta WhatsApp Business Phone Number ID.
+  phoneNumberId?: string;
+
   // Legacy compatibility only.
   callSid?: string;
 
@@ -139,6 +142,12 @@ const callLogSchema = new Schema<ICallLog>(
       maxlength: 256,
       set: (value: unknown) =>
         typeof value === "string" && value.trim() ? value.trim() : undefined,
+    },
+
+    phoneNumberId: {
+      type: String,
+      trim: true,
+      maxlength: 120,
     },
 
     callSid: {

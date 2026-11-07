@@ -27,8 +27,16 @@ callingRoutes.get(
   getCallLogs,
 );
 
+// ফ্রন্টএন্ড এবং ব্যাকএন্ড উভয়ের সামঞ্জস্যের জন্য দুটি পাথই সক্রিয় রাখা হলো
 callingRoutes.post(
   "/workspaces/:workspaceId/calls/start",
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  startOutgoingCall,
+);
+
+callingRoutes.post(
+  "/workspaces/:workspaceId/calls/outgoing",
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   startOutgoingCall,
@@ -42,21 +50,6 @@ callingRoutes.post(
 );
 
 // ── Internal cron route (Vercel Cron / external scheduler) ──────────────────
-//
-// Protected by a constant-time HMAC-SHA256 comparison against CRON_SECRET.
-// Configure in vercel.json:
-//
-//   {
-//     "crons": [{
-//       "path": "/api/internal/process-call-notifications",
-//       "schedule": "* * * * *"
-//     }]
-//   }
-//
-// The Vercel Cron scheduler supplies the Authorization header automatically:
-//   Authorization: Bearer <CRON_SECRET>
-//
-// NEVER expose this endpoint without authentication.
 
 const internalCronRouter = Router();
 
@@ -71,9 +64,7 @@ internalCronRouter.post(
     }
 
     const authHeader = req.headers.authorization ?? "";
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
 
     // Constant-time comparison to prevent timing attacks.
     const secretBuf = Buffer.from(cronSecret, "utf8");

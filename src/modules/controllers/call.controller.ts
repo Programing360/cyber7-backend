@@ -1,7 +1,9 @@
 import mongoose from "mongoose";
 import type { Response } from "express";
+import axios from "axios";
 
 import CallLog from "../Calling/CallLog.js";
+import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 
 const escapeRegex = (value: string): string =>
@@ -38,14 +40,19 @@ const safeToISOString = (date?: Date | string | null): string | null => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
+/**
+ * Get call logs with pagination, search, and filtering
+ */
 export const getCallLogs = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
   try {
-    // 1. Safe workspace ID check (_id or id fallback)
-    const rawWorkspaceId = req.workspace?.id;
-    const workspaceId = rawWorkspaceId ? String(rawWorkspaceId) : undefined;
+    const workspaceId =
+      req.workspace?.id ??
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -78,7 +85,6 @@ export const getCallLogs = async (
       });
     }
 
-    // 2. Build Query
     const query: Record<string, unknown> = {
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
     };
@@ -101,7 +107,6 @@ export const getCallLogs = async (
       ];
     }
 
-    // 3. Pagination Support
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.min(
       100,
@@ -167,32 +172,327 @@ export const getCallLogs = async (
 };
 
 /**
- * Outgoing calls remain disabled until the actual
- * Meta Calling API integration is implemented.
+ * Initiates an outgoing call via Meta WhatsApp Cloud API.
  */
 export const startOutgoingCall = async (
-  _req: WorkspaceRequest,
+  req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
-  return res.status(501).json({
-    success: false,
-    code: "META_CALLING_NOT_IMPLEMENTED",
-    message:
-      "Outgoing WhatsApp calling is not configured yet. No call was started.",
-  });
+  try {
+    const rawWorkspaceId =
+      req.workspace?.id ??
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
+
+    const workspaceId = rawWorkspaceId ? String(rawWorkspaceId) : undefined;
+    const rawUserId = (req as any).user?._id ?? (req as any).user?.id;
+    const userId = rawUserId ? String(rawUserId) : undefined;
+
+    if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
+      return res.status(403).json({
+        success: false,
+        code: "WORKSPACE_CONTEXT_REQUIRED",
+        message: "Valid workspace authorization is required.",
+      });
+    }
+
+    const { phoneNumber, callerName, sdpOffer } = req.body;
+
+    if (!phoneNumber || typeof phoneNumber !== "string") {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_PHONE_NUMBER",
+        message: "Recipient phone number is required.",
+      });
+    }
+
+    // ১. WebRTC SDP Offer ভ্যালিডেশন (মেটার জন্য বাধ্যতামূলক)
+    if (!sdpOffer || typeof sdpOffer !== "string") {
+      return res.status(400).json({
+        success: false,
+        code: "SDP_OFFER_REQUIRED",
+        message: "WebRTC SDP Offer is required to initiate an outgoing call.",
+      });
+    }
+
+    // ২. ফোন নম্বর ফরম্যাট ঠিক করা (E.164: শুধু সংখ্যা ও কান্ট্রি কোড)
+    let cleanPhone = phoneNumber.replace(/\D/g, "");
+
+    // ইউজার যদি 01... দিয়ে দেয়, তবে ডিফল্ট বাংলাদেশ কোড 88 যোগ করা
+    if (cleanPhone.startsWith("01") && cleanPhone.length === 11) {
+      cleanPhone = `88${cleanPhone}`;
+    }
+
+    if (!cleanPhone || cleanPhone.length < 10) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_PHONE_NUMBER",
+        message:
+          "A valid recipient phone number with country code is required.",
+      });
+    }
+
+    // ৩. ওয়ার্কস্পেসের WhatsApp অ্যাকাউন্ট ক্রেডেনশিয়াল রিট্রিভ করা
+    const account = await WhatsAppAccount.findOne({
+      workspaceId: new mongoose.Types.ObjectId(workspaceId),
+      status: "CONNECTED",
+    })
+      .select("phoneNumberId accessToken")
+      .lean();
+
+    if (!account) {
+      return res.status(400).json({
+        success: false,
+        code: "WHATSAPP_ACCOUNT_NOT_CONNECTED",
+        message:
+          "No connected WhatsApp Business account found for this workspace.",
+      });
+    }
+
+    const token =
+      (account as any).accessToken ||
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+      process.env.WHATSAPP_ACCESS_TOKEN;
+
+    const phoneNumberId =
+      account.phoneNumberId || process.env.TEST_PHONE_NUMBER_ID;
+
+    if (!token || !phoneNumberId) {
+      return res.status(500).json({
+        success: false,
+        code: "WHATSAPP_CREDENTIALS_MISSING",
+        message: "WhatsApp Access Token or Phone Number ID is missing.",
+      });
+    }
+
+    // ৪. মেটার Graph API দিয়ে আউটগোয়িং কল তৈরি করা
+    let providerCallId: string | undefined;
+    let metaSessionData: unknown = null;
+
+    try {
+      const metaPayload = {
+        messaging_product: "whatsapp",
+        to: cleanPhone,
+        action: "connect",
+        session: {
+          sdp_type: "offer",
+          sdp: sdpOffer,
+        },
+      };
+
+      const metaResponse = await axios.post(
+        `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
+        metaPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+
+      // মেটার দুই ধরনের রেসপন্স ফরম্যাটই সেফলি পার্স করা
+      providerCallId =
+        metaResponse.data?.id ||
+        metaResponse.data?.call_id ||
+        metaResponse.data?.calls?.[0]?.id;
+
+      metaSessionData =
+        metaResponse.data?.session ||
+        metaResponse.data?.calls?.[0]?.session ||
+        null;
+    } catch (metaError: any) {
+      console.error(
+        "[Meta Outgoing Call Error]:",
+        metaError.response?.data || metaError.message,
+      );
+
+      const errorMessage =
+        metaError.response?.data?.error?.message ||
+        "Failed to initiate call via WhatsApp Cloud API.";
+
+      return res.status(400).json({
+        success: false,
+        code: "META_OUTGOING_FAILED",
+        message: errorMessage,
+      });
+    }
+
+    // ৫. ডাটাবেজে OUTGOING CallLog তৈরি করা
+    const callLog = await CallLog.create({
+      workspaceId: new mongoose.Types.ObjectId(workspaceId),
+      phoneNumber: cleanPhone,
+      callerName: callerName || "Unknown",
+      callType: "OUTGOING",
+      status: "RINGING",
+      providerCallId: providerCallId || `outgoing_${Date.now()}`,
+      phoneNumberId,
+      startedAt: new Date(),
+      assignedTo:
+        userId && mongoose.Types.ObjectId.isValid(userId)
+          ? new mongoose.Types.ObjectId(userId)
+          : undefined,
+      durationSeconds: 0,
+      ringingUserIds: [],
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: callLog._id.toString(),
+        callId: callLog.providerCallId,
+        status: callLog.status,
+        session: metaSessionData, // মেটার ফেরত দেওয়া Answer SDP (যদি থাকে)
+      },
+    });
+  } catch (error) {
+    console.error("[Calling] Start outgoing call error:", error);
+    return res.status(500).json({
+      success: false,
+      code: "START_OUTGOING_CALL_FAILED",
+      message: "An internal error occurred while starting the call.",
+    });
+  }
 };
 
 /**
  * Call termination endpoint.
  */
 export const endCallSession = async (
-  _req: WorkspaceRequest,
+  req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
-  return res.status(501).json({
-    success: false,
-    code: "META_CALL_TERMINATION_NOT_IMPLEMENTED",
-    message:
-      "Call termination is not configured yet. The call state was not changed.",
-  });
+  try {
+    const workspaceId =
+      req.workspace?.id ??
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
+
+    if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
+      return res.status(403).json({
+        success: false,
+        code: "WORKSPACE_CONTEXT_REQUIRED",
+        message: "Valid workspace authorization is required.",
+      });
+    }
+
+    const callId = req.params.callId || req.body.callId;
+    const duration =
+      req.body.durationSeconds !== undefined
+        ? Number(req.body.durationSeconds)
+        : req.body.duration !== undefined
+          ? Number(req.body.duration)
+          : undefined;
+    const status = req.body.status || "ENDED";
+
+    if (!callId) {
+      return res.status(400).json({
+        success: false,
+        code: "CALL_ID_REQUIRED",
+        message: "Call ID is required to end the session.",
+      });
+    }
+
+    // MongoDB _id অথবা providerCallId উভয় দিয়েই কল খুঁজে নেওয়া
+    const query: Record<string, unknown> = {
+      workspaceId: new mongoose.Types.ObjectId(workspaceId),
+    };
+
+    if (mongoose.Types.ObjectId.isValid(callId)) {
+      query._id = new mongoose.Types.ObjectId(callId);
+    } else {
+      query.providerCallId = callId;
+    }
+
+    const call = await CallLog.findOne(query);
+
+    if (!call) {
+      return res.status(404).json({
+        success: false,
+        code: "CALL_NOT_FOUND",
+        message: "Call session not found.",
+      });
+    }
+
+    const now = new Date();
+    const finalDuration =
+      duration !== undefined
+        ? Math.floor(duration)
+        : call.startedAt
+          ? Math.max(
+              0,
+              Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
+            )
+          : 0;
+
+    // মেটাতে টার্মিনেশন রিকোয়েস্ট পাঠানো (যদি কলটি এখনও সক্রিয় থাকে)
+    if (call.providerCallId) {
+      const account = await WhatsAppAccount.findOne({
+        workspaceId: call.workspaceId,
+        status: "CONNECTED",
+      })
+        .select("phoneNumberId accessToken")
+        .lean();
+
+      const token =
+        (account as any)?.accessToken ||
+        process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+        process.env.WHATSAPP_ACCESS_TOKEN;
+
+      const targetPhoneNumberId =
+        call.phoneNumberId ||
+        account?.phoneNumberId ||
+        process.env.TEST_PHONE_NUMBER_ID;
+
+      if (token && targetPhoneNumberId) {
+        try {
+          await axios.post(
+            `https://graph.facebook.com/v21.0/${targetPhoneNumberId}/calls`,
+            {
+              messaging_product: "whatsapp",
+              call_id: call.providerCallId,
+              action: "terminate",
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+            },
+          );
+        } catch (metaErr: any) {
+          // মেটা আগে থেকেই ড্রপ করে থাকলে ওয়ার্নিং লগ করে প্রসেস চালিয়ে নেওয়া
+          console.warn(
+            "[Calling] Meta terminate call warning:",
+            metaErr.response?.data?.error?.message || metaErr.message,
+          );
+        }
+      }
+    }
+
+    call.status = status === "REJECTED" ? "REJECTED" : "ENDED";
+    call.endedAt = now;
+    call.durationSeconds = finalDuration;
+    await call.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Call session ended successfully.",
+      data: {
+        id: call._id.toString(),
+        callId: call.providerCallId,
+        status: call.status,
+        durationSeconds: call.durationSeconds,
+      },
+    });
+  } catch (error) {
+    console.error("[Calling] End call session failed:", error);
+    return res.status(500).json({
+      success: false,
+      code: "END_CALL_SESSION_FAILED",
+      message: "An error occurred while ending the call session.",
+    });
+  }
 };
