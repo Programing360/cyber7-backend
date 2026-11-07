@@ -15,10 +15,16 @@ const signupOtpSchema = new Schema(
       required: true,
       trim: true,
     },
+    // রেজিস্ট্রেশনের প্রাথমিক ডাটা ওটিপি ভেরিফিকেশনের জন্য ক্যাশ রাখা
+    tempRegistrationData: {
+      name: { type: String, required: true, trim: true },
+      phoneNumber: { type: String, required: true, trim: true },
+      passwordHash: { type: String, required: true },
+    },
     expiresAt: {
       type: Date,
       required: true,
-      index: { expires: 0 }, // TTL index: MongoDB will automatically remove document when expired
+      index: { expires: 0 }, // TTL: ১০ মিনিট পর অটো ডিলিট হবে
     },
     attempts: {
       type: Number,
@@ -43,4 +49,3 @@ export const SignupOtp =
   mongoose.models.SignupOtp || mongoose.model("SignupOtp", signupOtpSchema);
 
 export default SignupOtp;
-

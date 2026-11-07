@@ -18,7 +18,7 @@ const callingRoutes = Router();
 
 // ── Authenticated workspace call routes ─────────────────────────────────────
 
-callingRoutes.use(authenticate);
+callingRoutes.use("/workspaces/:workspaceId/calls", authenticate);
 
 callingRoutes.get(
   "/workspaces/:workspaceId/calls",

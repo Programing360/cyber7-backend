@@ -3,22 +3,21 @@ import { adminAuthController } from "./admin-auth.controller.js";
 import { requireBffAssertion } from "../../middlewares/verify-bff-assertion.js";
 import { authenticateAdminSession } from "../../middlewares/authenticate-admin-session.js";
 import { createAdminRateLimiter } from "../../middlewares/admin-rate-limit.js";
+import { redirectIfAdminAuthenticated } from "../../middlewares/redirect-if-admin-authenticated.js";
 
 const router = Router();
 
-// সেনসিটিভ অথেন্টিকেশন চেষ্টার জন্য স্ট্রিক্ট রেট লিমিটার (১৫ মিনিটে ৫টি ব্যর্থ চেষ্টা)
 const authLimiter = createAdminRateLimiter({
   maxAttempts: 5,
   windowMs: 15 * 60 * 1000,
 });
 
-// ইমেইল স্প্যামিং রোধে Resend OTP এর জন্য আলাদা রেট লিমিটার (৫ মিনিটে ৩টি রিকোয়েস্ট)
 const resendOtpLimiter = createAdminRateLimiter({
   maxAttempts: 3,
   windowMs: 5 * 60 * 1000,
 });
 
-// ১. ইনিশিয়াল SUPER_ADMIN বুটস্ট্র্যাপ
+// ১. SUPER_ADMIN বুটস্ট্র্যাপ
 router.post(
   "/bootstrap",
   requireBffAssertion,
@@ -26,15 +25,16 @@ router.post(
   adminAuthController.bootstrap,
 );
 
-// ২. অ্যাডমিন প্রাইমারি লগইন (পাসওয়ার্ড ভেরিফিকেশন ও Email OTP প্রেরণ)
+// ২. অ্যাডমিন প্রাইমারি লগইন (সেশন চেক মিডলওয়্যার যুক্ত করা হয়েছে)
 router.post(
   "/login",
   requireBffAssertion,
+  redirectIfAdminAuthenticated, // <--- অলরেডি SUPER_ADMIN বা সেশন থাকলে রিডাইরেক্ট পাঠাবে
   authLimiter,
   adminAuthController.login,
 );
 
-// ৩. Email OTP ভেরিফিকেশন এবং সেশন কুকি প্রদান
+// ৩. Email OTP ভেরিফিকেশন
 router.post(
   "/mfa/verify",
   requireBffAssertion,
@@ -42,7 +42,7 @@ router.post(
   adminAuthController.verifyEmailOtp,
 );
 
-// ৪. নতুন Email OTP প্রেরণের রিকোয়েস্ট (Resend)
+// ৪. Resend OTP
 router.post(
   "/resend-otp",
   requireBffAssertion,
@@ -50,7 +50,7 @@ router.post(
   adminAuthController.resendEmailOtp,
 );
 
-// ৫. কারেন্ট অ্যাডমিন প্রোফাইল ও সেশন স্ট্যাটাস
+// ৫. কারেন্ট অ্যাডমিন প্রোফাইল
 router.get(
   "/me",
   requireBffAssertion,
@@ -58,7 +58,7 @@ router.get(
   adminAuthController.getMe,
 );
 
-// ৬. অ্যাডমিন লগআউট ও সেশন রিভোকেশন
+// ৬. অ্যাডমিন লগআউট
 router.post(
   "/logout",
   requireBffAssertion,

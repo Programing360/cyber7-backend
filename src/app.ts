@@ -3,6 +3,7 @@ import http from "http";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import cookieParser from "cookie-parser";
 import { Server } from "socket.io";
 
 import authRouter from "./modules/auth/auth.routes.js";
@@ -68,12 +69,23 @@ const corsOptions: cors.CorsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  // Admin BFF Assertion এবং সেশন হেডার অ্যালাউ করা হলো
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "x-bff-assertion",
+    "x-admin-bff-assertion",
+    "x-admin-session-token",
+  ],
 };
 
 app.use(cors(corsOptions));
 
-// 4. Disable browser caching for all dynamic API responses
+// 4. Cookie Parser Middleware (অ্যাডমিন HttpOnly সেশন কুকি পার্স করার জন্য আবশ্যক)
+app.use(cookieParser());
+
+// 5. Disable browser caching for all dynamic API responses
 app.use("/api", (_req, res, next) => {
   res.set({
     "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
@@ -83,7 +95,7 @@ app.use("/api", (_req, res, next) => {
   next();
 });
 
-// 5. Socket.IO initialization with robust CORS & transports
+// 6. Socket.IO initialization with robust CORS & transports
 const io = new Server<
   ClientToServerEvents,
   ServerToClientEvents,
@@ -93,18 +105,6 @@ const io = new Server<
   cors: corsOptions,
   transports: ["websocket", "polling"],
 });
-
-// console.log("[Socket.IO] Initialized:", io.engine !== undefined);
-// console.log("[Socket.IO] Path:", io.engine.opts.path);
-
-// console.log("[SOCKET DEBUG]", {
-//   path: "/socket.io/",
-//   attached: server.listeners("request").length,
-// });
-
-// io.engine.on("connection", (connection) => {
-//   console.log("[Socket.IO] Engine connected:", connection.id);
-// });
 
 // Preserve exact request bytes for Meta webhook signature verification.
 app.use(

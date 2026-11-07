@@ -50,9 +50,7 @@ export const getCallLogs = async (
   try {
     const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string"
-        ? req.params.workspaceId
-        : undefined);
+      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -179,15 +177,10 @@ export const startOutgoingCall = async (
   res: Response,
 ): Promise<Response> => {
   try {
-    const rawWorkspaceId =
+    const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string"
-        ? req.params.workspaceId
-        : undefined);
-
-    const workspaceId = rawWorkspaceId ? String(rawWorkspaceId) : undefined;
-    const rawUserId = (req as any).user?._id ?? (req as any).user?.id;
-    const userId = rawUserId ? String(rawUserId) : undefined;
+      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
+    const userId = req.user?.id;
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -207,33 +200,18 @@ export const startOutgoingCall = async (
       });
     }
 
-    // ১. WebRTC SDP Offer ভ্যালিডেশন (মেটার জন্য বাধ্যতামূলক)
-    if (!sdpOffer || typeof sdpOffer !== "string") {
-      return res.status(400).json({
-        success: false,
-        code: "SDP_OFFER_REQUIRED",
-        message: "WebRTC SDP Offer is required to initiate an outgoing call.",
-      });
-    }
+    // телефон নম্বর ফরম্যাট ঠিক করা (E.164: শুধু সংখ্যা)
+    const cleanPhone = phoneNumber.replace(/\D/g, "");
 
-    // ২. ফোন নম্বর ফরম্যাট ঠিক করা (E.164: শুধু সংখ্যা ও কান্ট্রি কোড)
-    let cleanPhone = phoneNumber.replace(/\D/g, "");
-
-    // ইউজার যদি 01... দিয়ে দেয়, তবে ডিফল্ট বাংলাদেশ কোড 88 যোগ করা
-    if (cleanPhone.startsWith("01") && cleanPhone.length === 11) {
-      cleanPhone = `88${cleanPhone}`;
-    }
-
-    if (!cleanPhone || cleanPhone.length < 10) {
+    if (!cleanPhone || cleanPhone.length < 7) {
       return res.status(400).json({
         success: false,
         code: "INVALID_PHONE_NUMBER",
-        message:
-          "A valid recipient phone number with country code is required.",
+        message: "A valid recipient phone number is required.",
       });
     }
 
-    // ৩. ওয়ার্কস্পেসের WhatsApp অ্যাকাউন্ট ক্রেডেনশিয়াল রিট্রিভ করা
+    // ১. ওয়ার্কস্পেসের WhatsApp অ্যাকাউন্ট ক্রেডেনশিয়াল রিট্রিভ করা
     const account = await WhatsAppAccount.findOne({
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
       status: "CONNECTED",
@@ -266,20 +244,23 @@ export const startOutgoingCall = async (
       });
     }
 
-    // ৪. মেটার Graph API দিয়ে আউটগোয়িং কল তৈরি করা
+    // ২. মেটার Graph API দিয়ে আউটগোয়িং কল তৈরি করা
     let providerCallId: string | undefined;
     let metaSessionData: unknown = null;
 
     try {
-      const metaPayload = {
+      const metaPayload: Record<string, unknown> = {
         messaging_product: "whatsapp",
         to: cleanPhone,
         action: "connect",
-        session: {
+      };
+
+      if (sdpOffer) {
+        metaPayload.session = {
           sdp_type: "offer",
           sdp: sdpOffer,
-        },
-      };
+        };
+      }
 
       const metaResponse = await axios.post(
         `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
@@ -292,16 +273,8 @@ export const startOutgoingCall = async (
         },
       );
 
-      // মেটার দুই ধরনের রেসপন্স ফরম্যাটই সেফলি পার্স করা
-      providerCallId =
-        metaResponse.data?.id ||
-        metaResponse.data?.call_id ||
-        metaResponse.data?.calls?.[0]?.id;
-
-      metaSessionData =
-        metaResponse.data?.session ||
-        metaResponse.data?.calls?.[0]?.session ||
-        null;
+      providerCallId = metaResponse.data?.id || metaResponse.data?.call_id;
+      metaSessionData = metaResponse.data?.session ?? null;
     } catch (metaError: any) {
       console.error(
         "[Meta Outgoing Call Error]:",
@@ -319,7 +292,7 @@ export const startOutgoingCall = async (
       });
     }
 
-    // ৫. ডাটাবেজে OUTGOING CallLog তৈরি করা
+    // ৩. ডাটাবেজে OUTGOING CallLog তৈরি করা
     const callLog = await CallLog.create({
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
       phoneNumber: cleanPhone,
@@ -329,10 +302,7 @@ export const startOutgoingCall = async (
       providerCallId: providerCallId || `outgoing_${Date.now()}`,
       phoneNumberId,
       startedAt: new Date(),
-      assignedTo:
-        userId && mongoose.Types.ObjectId.isValid(userId)
-          ? new mongoose.Types.ObjectId(userId)
-          : undefined,
+      assignedTo: userId && mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : undefined,
       durationSeconds: 0,
       ringingUserIds: [],
     });
@@ -343,7 +313,7 @@ export const startOutgoingCall = async (
         id: callLog._id.toString(),
         callId: callLog.providerCallId,
         status: callLog.status,
-        session: metaSessionData, // মেটার ফেরত দেওয়া Answer SDP (যদি থাকে)
+        session: metaSessionData,
       },
     });
   } catch (error) {
@@ -366,9 +336,7 @@ export const endCallSession = async (
   try {
     const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string"
-        ? req.params.workspaceId
-        : undefined);
+      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -422,9 +390,9 @@ export const endCallSession = async (
         ? Math.floor(duration)
         : call.startedAt
           ? Math.max(
-              0,
-              Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
-            )
+            0,
+            Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
+          )
           : 0;
 
     // মেটাতে টার্মিনেশন রিকোয়েস্ট পাঠানো (যদি কলটি এখনও সক্রিয় থাকে)
