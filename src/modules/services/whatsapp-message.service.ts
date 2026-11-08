@@ -187,6 +187,15 @@ export async function processIncomingWhatsAppMessage({
   );
 
   // 4. Find or create conversation — updating 24-hour customer service window timestamp
+
+  const isWindowActive = !isStopKeyword;
+  const expiryDate = getCustomerServiceWindowExpiry
+    ? getCustomerServiceWindowExpiry(incomingDate)
+    : new Date(
+        incomingDate.getTime() +
+          (CUSTOMER_SERVICE_WINDOW_MS || 24 * 60 * 60 * 1000),
+      );
+
   const conversationStatus = isStopKeyword ? "CLOSED" : "OPEN";
 
   const conversation = await WhatsAppConversation.findOneAndUpdate(
@@ -200,6 +209,8 @@ export async function processIncomingWhatsAppMessage({
         status: conversationStatus,
         lastMessageAt: incomingDate,
         lastCustomerMessageAt: incomingDate,
+        isCustomerServiceWindowActive: isWindowActive, // ✅ ২৪ ঘণ্টার উইন্ডো সক্রিয় করা হলো
+        customerServiceWindowExpiresAt: expiryDate,
       },
     },
     {
@@ -232,7 +243,6 @@ export async function processIncomingWhatsAppMessage({
       mediaMimeType: message.mediaMimeType,
       timestamp: incomingDate,
     });
-
     // console.log("[INBOUND MESSAGE SAVED]", {
     //   messageId: savedMessage._id.toString(),
     //   waMessageId: savedMessage.waMessageId,
