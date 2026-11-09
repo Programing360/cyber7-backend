@@ -87,7 +87,7 @@ export async function processIncomingWhatsAppMessage({
     status: "CONNECTED",
   }).select("+accessTokenEncrypted");
 
-  // console.log("[INBOUND ACCOUNT CHECK]", {
+  // ("[INBOUND ACCOUNT CHECK]", {
   //   phoneNumberId: cleanPhoneId,
   //   accountFound: Boolean(account),
   //   accountStatus: account?.status,
@@ -246,7 +246,7 @@ export async function processIncomingWhatsAppMessage({
       mediaMimeType: message.mediaMimeType,
       timestamp: incomingDate,
     });
-    // console.log("[INBOUND MESSAGE SAVED]", {
+    // ("[INBOUND MESSAGE SAVED]", {
     //   messageId: savedMessage._id.toString(),
     //   waMessageId: savedMessage.waMessageId,
     // });
@@ -845,7 +845,11 @@ export async function getWhatsAppMediaStream({
 }: {
   workspaceId: string;
   mediaId: string;
-}): Promise<{ stream: NodeJS.ReadableStream; contentType: string; contentLength?: number }> {
+}): Promise<{
+  stream: NodeJS.ReadableStream;
+  contentType: string;
+  contentLength?: number;
+}> {
   if (!Types.ObjectId.isValid(workspaceId)) {
     throw new AppError("Invalid workspace ID", 400);
   }
@@ -860,7 +864,10 @@ export async function getWhatsAppMediaStream({
   }).select("+accessTokenEncrypted");
 
   if (!account || !account.accessTokenEncrypted) {
-    throw new AppError("No active WhatsApp account connected for this workspace", 404);
+    throw new AppError(
+      "No active WhatsApp account connected for this workspace",
+      404,
+    );
   }
 
   let token: string;
@@ -871,12 +878,15 @@ export async function getWhatsAppMediaStream({
   }
 
   // 2. Fetch media URL from Meta Graph API: GET https://graph.facebook.com/v21.0/{media_id}
-  const metaInfoRes = await axios.get(`https://graph.facebook.com/v21.0/${mediaId}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
+  const metaInfoRes = await axios.get(
+    `https://graph.facebook.com/v21.0/${mediaId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      timeout: 15000,
     },
-    timeout: 15000,
-  });
+  );
 
   const mediaUrl = metaInfoRes.data?.url;
   const mimeType = metaInfoRes.data?.mime_type || "application/octet-stream";
@@ -961,7 +971,11 @@ export async function sendWhatsAppMediaMessage({
   }
 
   if (contact.isOptedOut) {
-    throw new AppError("This contact has opted out of WhatsApp messages.", 422, "CONTACT_OPTED_OUT");
+    throw new AppError(
+      "This contact has opted out of WhatsApp messages.",
+      422,
+      "CONTACT_OPTED_OUT",
+    );
   }
 
   // Server-side enforcement of 24-hour Customer Service Window
@@ -994,11 +1008,15 @@ export async function sendWhatsAppMediaMessage({
   const recipientPhone = rawRecipient.replace(/\D/g, "");
 
   if (!recipientPhone || recipientPhone.length < 5) {
-    throw new AppError("Contact does not have a valid WhatsApp phone number", 400);
+    throw new AppError(
+      "Contact does not have a valid WhatsApp phone number",
+      400,
+    );
   }
 
   let metaMediaId: string | undefined = undefined;
-  const determinedMime = mimeType || (type === "VIDEO" ? "video/mp4" : "image/jpeg");
+  const determinedMime =
+    mimeType || (type === "VIDEO" ? "video/mp4" : "image/jpeg");
 
   // If base64 file data was sent, upload to Meta Media API first
   if (fileBase64) {
@@ -1011,7 +1029,10 @@ export async function sendWhatsAppMediaMessage({
     formData.append(
       "file",
       new Blob([buffer], { type: determinedMime }),
-      filename || (type === "VIDEO" ? `video-${Date.now()}.mp4` : `image-${Date.now()}.jpg`),
+      filename ||
+        (type === "VIDEO"
+          ? `video-${Date.now()}.mp4`
+          : `image-${Date.now()}.jpg`),
     );
 
     const uploadRes = await axios.post(
@@ -1057,7 +1078,9 @@ export async function sendWhatsAppMediaMessage({
     },
   );
 
-  const metaMsgId = (apiResponse.messages as Array<{ id?: string }> | undefined)?.[0]?.id;
+  const metaMsgId = (
+    apiResponse.messages as Array<{ id?: string }> | undefined
+  )?.[0]?.id;
   if (!metaMsgId) {
     throw new AppError("WhatsApp API did not return a message ID", 502);
   }

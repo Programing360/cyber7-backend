@@ -34,7 +34,7 @@ export async function requireBffAssertion(
 ): Promise<void> {
   // উভয় স্ট্যান্ডার্ড হেডার চেক করা
 
-  console.log('click');
+
 
   const rawToken =
     req.headers["x-bff-assertion"] || req.headers["x-admin-bff-assertion"];
@@ -46,7 +46,6 @@ export async function requireBffAssertion(
         ? rawToken[0]?.trim()
         : "";
 
-  console.log(token);
 
   if (!token) {
     safeAuditLog({

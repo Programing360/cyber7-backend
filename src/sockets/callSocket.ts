@@ -545,6 +545,17 @@ export const initCallSocket = (io: CallSocketServer): void => {
           return;
         }
 
+        console.log("[CALL ACCEPT ATTEMPT]", {
+          userId,
+          workspaceId: data.workspaceId,
+          receivedCallId: data.callId,
+          providerCallId: call.providerCallId,
+          callLogId: call._id.toString(),
+          status: call.status,
+          timestamp: new Date().toISOString(),
+        });
+
+        
         const metaSuccess = await acceptMetaCallWithSdp(
           phoneId,
           targetCallId,

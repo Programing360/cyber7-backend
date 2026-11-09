@@ -14,7 +14,7 @@ async function main() {
 
   // Check Workspaces
   const workspaces = await Workspace.find().lean();
-  console.log(`Found ${workspaces.length} workspaces:`);
+
   for (const ws of workspaces) {
     console.log(`  - Workspace ID: ${ws._id.toString()}, Name: ${ws.name}, Slug: ${ws.slug}`);
   }

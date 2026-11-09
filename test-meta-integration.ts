@@ -40,7 +40,7 @@ function record(r: TestResult) {
         : r.status === "WARN"
           ? "⚠️"
           : "⏭️";
-  console.log(`  ${icon} ${r.name}`);
+
   if (r.details) console.log(`     ${r.details}`);
   if (r.metaStatusCode)
     console.log(`     Meta HTTP Status: ${r.metaStatusCode}`);
@@ -251,13 +251,13 @@ record({
   details: hasTestCredentials
     ? `TEST_PHONE_NUMBER_ID: set, TEST_WABA_ID: set, META_SYSTEM_USER_ACCESS_TOKEN: set (${META_SYSTEM_USER_ACCESS_TOKEN!.length} chars)`
     : [
-      "Missing test credentials in .env. Add these for live API tests:",
-      "  TEST_PHONE_NUMBER_ID=<your phone number ID>",
-      "  TEST_WABA_ID=<your WABA ID>",
-      "  META_SYSTEM_USER_ACCESS_TOKEN=<your System User access token>",
-      "  TEST_RECIPIENT_PHONE=<authorized test recipient number>",
-      "  TEST_DISPLAY_PHONE=<display phone number from Meta>",
-    ].join("\n     "),
+        "Missing test credentials in .env. Add these for live API tests:",
+        "  TEST_PHONE_NUMBER_ID=<your phone number ID>",
+        "  TEST_WABA_ID=<your WABA ID>",
+        "  META_SYSTEM_USER_ACCESS_TOKEN=<your System User access token>",
+        "  TEST_RECIPIENT_PHONE=<authorized test recipient number>",
+        "  TEST_DISPLAY_PHONE=<display phone number from Meta>",
+      ].join("\n     "),
 });
 
 if (!hasTestCredentials) {
@@ -402,9 +402,12 @@ if (tokenResult.status === 200 && tokenResult.data) {
       META_SYSTEM_USER_ACCESS_TOKEN!,
     );
     if (assignedWabasRes.status === 200 && assignedWabasRes.data) {
-      const assigned = (assignedWabasRes.data.data as Array<Record<string, unknown>>) || [];
+      const assigned =
+        (assignedWabasRes.data.data as Array<Record<string, unknown>>) || [];
       if (assigned.length > 0) {
-        const assignedIds = assigned.map((a) => `${a.id} (${a.name || "N/A"})`).join(", ");
+        const assignedIds = assigned
+          .map((a) => `${a.id} (${a.name || "N/A"})`)
+          .join(", ");
         record({
           name: "System User assigned WABAs",
           status: "PASS",
@@ -467,14 +470,18 @@ if (wabaResult.status === 200 && wabaResult.data) {
     META_SYSTEM_USER_ACCESS_TOKEN!,
   );
   if (wabaPhonesResult.status === 200 && wabaPhonesResult.data) {
-    const phones = (wabaPhonesResult.data.data as Array<Record<string, unknown>>) || [];
-    const phoneListStr = phones.map((p) => `id=${p.id} (${p.display_phone_number})`).join(", ");
+    const phones =
+      (wabaPhonesResult.data.data as Array<Record<string, unknown>>) || [];
+    const phoneListStr = phones
+      .map((p) => `id=${p.id} (${p.display_phone_number})`)
+      .join(", ");
     record({
       name: "WABA Phone Numbers list",
       status: "PASS",
-      details: phones.length > 0
-        ? `Found ${phones.length} phone number(s) on WABA: ${phoneListStr}`
-        : "No phone numbers registered on this WABA yet.",
+      details:
+        phones.length > 0
+          ? `Found ${phones.length} phone number(s) on WABA: ${phoneListStr}`
+          : "No phone numbers registered on this WABA yet.",
     });
   } else {
     record({
@@ -485,10 +492,13 @@ if (wabaResult.status === 200 && wabaResult.data) {
   }
 } else {
   const errCode = (wabaResult.errorData?.error as any)?.code;
-  const errSubcode = (wabaResult.errorData?.error as any)?.error_subcode ?? (wabaResult.errorData?.error as any)?.subcode;
+  const errSubcode =
+    (wabaResult.errorData?.error as any)?.error_subcode ??
+    (wabaResult.errorData?.error as any)?.subcode;
   let hint = "";
   if (errCode === 100 && (errSubcode === 33 || errSubcode === "33")) {
-    hint = " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this WABA. In Meta Business Manager -> Users -> System Users -> Select 'cyber7wp_bot' -> Assign Assets -> WhatsApp Accounts -> Select WABA -> grant 'Full control'].";
+    hint =
+      " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this WABA. In Meta Business Manager -> Users -> System Users -> Select 'cyber7wp_bot' -> Assign Assets -> WhatsApp Accounts -> Select WABA -> grant 'Full control'].";
   }
   record({
     name: "WABA ID retrieval",
@@ -527,10 +537,13 @@ if (phoneResult.status === 200 && phoneResult.data) {
   });
 } else {
   const errCode = (phoneResult.errorData?.error as any)?.code;
-  const errSubcode = (phoneResult.errorData?.error as any)?.error_subcode ?? (phoneResult.errorData?.error as any)?.subcode;
+  const errSubcode =
+    (phoneResult.errorData?.error as any)?.error_subcode ??
+    (phoneResult.errorData?.error as any)?.subcode;
   let hint = "";
   if (errCode === 100 && (errSubcode === 33 || errSubcode === "33")) {
-    hint = " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this Phone Number ID or it does not exist under the assigned assets].";
+    hint =
+      " [HINT: Meta Error 100/33 indicates the System User lacks asset permissions for this Phone Number ID or it does not exist under the assigned assets].";
   }
   record({
     name: "Phone Number ID retrieval",
@@ -555,7 +568,8 @@ const wabaPhonesCheck = await metaGet(
 
 let phoneInWaba = false;
 if (wabaPhonesCheck.status === 200 && wabaPhonesCheck.data) {
-  const phonesList = (wabaPhonesCheck.data.data as Array<{ id?: string }>) || [];
+  const phonesList =
+    (wabaPhonesCheck.data.data as Array<{ id?: string }>) || [];
   phoneInWaba = phonesList.some((p) => p.id === TEST_PHONE_NUMBER_ID);
 }
 
@@ -599,7 +613,10 @@ try {
   });
 
   // Verify WABA service
-  const wabaDetails = await svcVerifyWaba(TEST_WABA_ID!, META_SYSTEM_USER_ACCESS_TOKEN!);
+  const wabaDetails = await svcVerifyWaba(
+    TEST_WABA_ID!,
+    META_SYSTEM_USER_ACCESS_TOKEN!,
+  );
 
   record({
     name: "Service: verifyWhatsAppBusinessAccount()",
@@ -679,10 +696,10 @@ if (!ENABLE_TEST_MESSAGE_SEND || !TEST_RECIPIENT_PHONE) {
     details: !ENABLE_TEST_MESSAGE_SEND
       ? "ENABLE_TEST_MESSAGE_SEND is not set to 'true'. Set ENABLE_TEST_MESSAGE_SEND=true and TEST_RECIPIENT_PHONE in .env to run outbound live messaging test."
       : [
-        "TEST_RECIPIENT_PHONE not configured in .env.",
-        "Add: TEST_RECIPIENT_PHONE=<authorized test number in international format, e.g. 8801XXXXXXXXX>",
-        "The number must be registered in your Meta WhatsApp test numbers.",
-      ].join("\n     "),
+          "TEST_RECIPIENT_PHONE not configured in .env.",
+          "Add: TEST_RECIPIENT_PHONE=<authorized test number in international format, e.g. 8801XXXXXXXXX>",
+          "The number must be registered in your Meta WhatsApp test numbers.",
+        ].join("\n     "),
   });
 } else {
   // Send a test message directly via Meta Graph API (not through the full service layer,

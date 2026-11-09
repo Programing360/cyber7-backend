@@ -204,6 +204,11 @@ export async function acceptMetaCallWithSdp(
         },
       },
     );
+    console.log("[META ACCEPT RESPONSE]", {
+      status: response.status,
+      data: response.data,
+      callId,
+    });
 
     logEvent("Meta call accepted successfully via Graph API", { callId });
     return response.status === 200;
@@ -450,13 +455,10 @@ async function ensureCallLog(
   identity: CallIdentity,
   incomingRecipients?: IncomingRecipients,
 ): Promise<{ created: boolean; callLogId: Types.ObjectId }> {
-  const callLogId = new mongoose.Types.ObjectId();
-
   const insertFields: Record<string, unknown> = {
-    _id: callLogId,
     workspaceId,
     providerCallId: identity.callId,
-    callSid: callLogId.toString(),
+    callSid: new mongoose.Types.ObjectId().toString(),
     callerName: identity.callerName,
     phoneNumber: identity.phoneNumber,
     phoneNumberId: identity.phoneNumberId,
@@ -476,27 +478,53 @@ async function ensureCallLog(
   }
 
   try {
+    const result = await CallLog.updateOne(
+      {
+        workspaceId,
+        providerCallId: identity.callId,
+      },
+      {
+        $setOnInsert: insertFields,
+      },
+      {
+        upsert: true,
+        runValidators: true,
+      },
+    );
+
+    const call = await CallLog.findOne({
+      workspaceId,
+      providerCallId: identity.callId,
+    })
+      .select("_id")
+      .lean();
+
+    if (!call) {
+      throw new Error("Failed to create or retrieve CallLog.");
+    }
+
+    return {
+      created: result.upsertedCount === 1,
+      callLogId: call._id,
+    };
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) {
+      throw error;
+    }
+
     const existing = await CallLog.findOne({
       workspaceId,
       providerCallId: identity.callId,
-    }).select("_id");
+    })
+      .select("_id")
+      .lean();
 
-    if (existing) {
-      return { created: false, callLogId: existing._id };
-    }
+    if (!existing) throw error;
 
-    const created = await CallLog.create(insertFields);
-    return { created: true, callLogId: created._id };
-  } catch (error) {
-    const fallback = await CallLog.findOne({
-      workspaceId,
-      providerCallId: identity.callId,
-    }).select("_id");
-
-    if (fallback) {
-      return { created: false, callLogId: fallback._id };
-    }
-    throw error;
+    return {
+      created: false,
+      callLogId: existing._id,
+    };
   }
 }
 

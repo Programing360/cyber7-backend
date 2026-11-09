@@ -107,7 +107,15 @@ const callLogSchema = new Schema<ICallLog>(
 
     status: {
       type: String,
-      enum: ["RINGING", "ASSIGNING", "CONNECTED", "ENDED", "REJECTED", "MISSED", "FAILED"],
+      enum: [
+        "RINGING",
+        "ASSIGNING",
+        "CONNECTED",
+        "ENDED",
+        "REJECTED",
+        "MISSED",
+        "FAILED",
+      ],
       default: "RINGING",
       required: true,
     },
@@ -194,10 +202,10 @@ callLogSchema.index(
   },
   {
     unique: true,
+    name: "unique_workspace_provider_call",
     partialFilterExpression: {
       providerCallId: { $type: "string" },
     },
-    name: "unique_workspace_provider_call",
   },
 );
 

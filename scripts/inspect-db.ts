@@ -19,7 +19,7 @@ async function run() {
   console.log("Members:", members.map((m: any) => ({ workspaceId: m.workspaceId, userId: m.userId, role: m.role })));
 
   const accounts = await WhatsAppAccount.find().lean();
-  console.log("WhatsApp Accounts count:", accounts.length);
+
   if (accounts.length > 0) {
     console.log("Accounts:", accounts);
   }
