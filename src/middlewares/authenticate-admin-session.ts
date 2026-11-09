@@ -30,6 +30,19 @@ export interface AdminAuthenticatedRequest extends Request {
   admin?: AdminContext;
 }
 
+/**
+ * Lightweight helper to evaluate if a session creation timestamp is invalidated by tokenInvalidBefore.
+ */
+export function isSessionInvalidated(
+  sessionCreatedAt: Date | string | number,
+  tokenInvalidBefore?: Date | string | number | null,
+): boolean {
+  if (!tokenInvalidBefore) return false;
+  const sessionTime = new Date(sessionCreatedAt).getTime();
+  const invalidBeforeTime = new Date(tokenInvalidBefore).getTime();
+  return sessionTime < invalidBeforeTime;
+}
+
 function extractAdminToken(req: Request): {
   token?: string;
   customerTokenDetected: boolean;

@@ -7,9 +7,10 @@ export const LOGIN_RATE_LIMIT_CONFIG = {
 } as const;
 
 export const REGISTER_RATE_LIMIT_CONFIG = {
-  windowMs: 60 * 60 * 1000, // 60 minutes (1 hour)
+  windowMs: 5 * 60 * 1000, // 5 minutes
   limit: 3, // max 3 registrations per window per IP
-  message: "Too many registration attempts from this IP address. Please try again after 1 hour.",
+  message:
+    "Too many registration attempts from this IP address. Please try again after 5 minutes.",
 } as const;
 
 /**
@@ -57,4 +58,3 @@ export const registerRateLimiter = rateLimit({
     res.status(options.statusCode).json(options.message);
   },
 });
-

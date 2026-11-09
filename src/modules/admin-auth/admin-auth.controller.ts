@@ -5,6 +5,7 @@ import {
   verifyMfaChallengeToken,
 } from "./admin-auth.service.js";
 import { adminEmailOtpService } from "./admin-email-otp.service.js";
+import { adminSessionService } from "./admin-session.service.js";
 import type { AdminAuthenticatedRequest } from "../../middlewares/authenticate-admin-session.js";
 import { clearAdminCookieOptions } from "./admin-cookie.util.js";
 import { loadAdminSessionEnv } from "../../config/env.js";
@@ -361,6 +362,8 @@ export class AdminAuthController {
     next: NextFunction,
   ): Promise<void> => {
     try {
+      console.log(req.admin);
+
       if (!req.admin?.user || !req.admin?.session) {
         res.status(401).json({
           success: false,
@@ -397,6 +400,37 @@ export class AdminAuthController {
       });
     } catch (err) {
       console.error("[AdminAuthController.getMe Error]:", err);
+      next(err);
+    }
+  };
+
+  /**
+   * POST /api/platform-admin/auth/sessions/purge
+   */
+  public purgeSessions = async (
+    req: AdminAuthenticatedRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    try {
+      const actor = {
+        adminUserId: req.admin?.user?.id,
+        adminEmail: req.admin?.user?.email,
+        sessionId: req.admin?.session?.id,
+        ipAddress:
+          req.ip || (req.headers["x-forwarded-for"] as string) || "127.0.0.1",
+        userAgent: req.headers["user-agent"] || "unknown",
+      };
+
+      const purgedCount = await adminSessionService.purgeSessions(actor);
+
+      res.status(200).json({
+        success: true,
+        message: "Expired and revoked sessions purged successfully.",
+        purgedCount,
+      });
+    } catch (err) {
+      console.error("[AdminAuthController.purgeSessions Error]:", err);
       next(err);
     }
   };

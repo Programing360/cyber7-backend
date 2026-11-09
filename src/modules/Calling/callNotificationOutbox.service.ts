@@ -1,15 +1,17 @@
 import type { Types } from "mongoose";
-
 import CallNotificationOutbox from "./CallNotificationOutbox.js";
-import { deliverCallEndedNotification, deliverIncomingCallNotification } from "../../sockets/callSocket.js";
-
+import {
+  deliverCallEndedNotification,
+  deliverIncomingCallNotification,
+  getCallSocketIO,
+} from "../../sockets/callSocket.js";
 
 export type IncomingCallPayload = {
   workspaceId: string;
   callId: string;
   name: string;
   phone: string;
-  sdpOffer?: string; // WebRTC SDP Offer
+  sdpOffer?: string;
   phoneNumberId?: string;
 };
 
@@ -28,9 +30,6 @@ type CommonNotificationParams = {
   recipientUserIds: Types.ObjectId[];
 };
 
-/**
- * Removes duplicate recipient IDs.
- */
 function getUniqueRecipientIds(
   recipientUserIds: Types.ObjectId[],
 ): Types.ObjectId[] {
@@ -39,9 +38,6 @@ function getUniqueRecipientIds(
   ];
 }
 
-/**
- * Persist incoming-call notifications and instantly dispatch via Socket.IO.
- */
 export async function enqueueIncomingCallNotifications(
   params: CommonNotificationParams & {
     payload: IncomingCallPayload;
@@ -50,11 +46,30 @@ export async function enqueueIncomingCallNotifications(
   const { workspaceId, callLogId, providerCallId, recipientUserIds, payload } =
     params;
 
-  if (recipientUserIds.length === 0) return;
-
+  const wsId = workspaceId.toString();
   const uniqueRecipientIds = getUniqueRecipientIds(recipientUserIds);
 
-  // ১. আউটবক্স ডাটাবেজে ব্যাকআপ হিসেবে সংরক্ষণ
+  const socketData = {
+    notificationId: providerCallId,
+    workspaceId: wsId,
+    callId: providerCallId,
+    callSid: callLogId.toString(),
+    name: payload.name,
+    phone: payload.phone,
+    sdpOffer: payload.sdpOffer,
+    phoneNumberId: payload.phoneNumberId,
+  };
+
+  // Recipient না থাকলে শুধু workspace-scoped fallback।
+  // Global io.emit() ব্যবহার করা যাবে না।
+  if (uniqueRecipientIds.length === 0) {
+    const io = getCallSocketIO();
+
+    io?.to(`workspace_${wsId}`).emit("incoming-call", socketData);
+    return;
+  }
+
+  // আগে Outbox-এ persist করব, তারপর immediate delivery চেষ্টা করব।
   await CallNotificationOutbox.bulkWrite(
     uniqueRecipientIds.map((recipientUserId) => ({
       updateOne: {
@@ -72,7 +87,14 @@ export async function enqueueIncomingCallNotifications(
             recipientUserId,
             eventType: "INCOMING_CALL",
             status: "PENDING",
-            payload,
+            payload: {
+              workspaceId: wsId,
+              callId: providerCallId,
+              name: payload.name,
+              phone: payload.phone,
+              sdpOffer: payload.sdpOffer,
+              phoneNumberId: payload.phoneNumberId,
+            },
             attempts: 0,
             nextAttemptAt: new Date(),
           },
@@ -80,21 +102,8 @@ export async function enqueueIncomingCallNotifications(
         upsert: true,
       },
     })),
-    {
-      ordered: false,
-    },
+    { ordered: false },
   );
-
-  // ২. তাৎক্ষণিকভাবে কানেক্টেড ইউজারদের সকেটে ইনকামিং কল ইমিট পাঠানো
-  const socketData = {
-    notificationId: providerCallId,
-    workspaceId: workspaceId.toString(),
-    callId: providerCallId,
-    callSid: callLogId.toString(),
-    name: payload.name,
-    phone: payload.phone,
-    sdpOffer: payload.sdpOffer,
-  };
 
   await Promise.allSettled(
     uniqueRecipientIds.map(async (recipientUserId) => {
@@ -103,29 +112,31 @@ export async function enqueueIncomingCallNotifications(
         socketData,
       );
 
-      if (delivered) {
-        await CallNotificationOutbox.updateOne(
-          {
-            workspaceId,
-            providerCallId,
-            recipientUserId,
-            eventType: "INCOMING_CALL",
+      if (!delivered) return;
+
+      await CallNotificationOutbox.updateOne(
+        {
+          workspaceId,
+          providerCallId,
+          recipientUserId,
+          eventType: "INCOMING_CALL",
+        },
+        {
+          $set: {
+            status: "DELIVERED",
+            deliveredAt: new Date(),
           },
-          {
-            $set: {
-              status: "DELIVERED",
-              deliveredAt: new Date(),
-            },
+          $unset: {
+            processingAt: 1,
+            leaseExpiresAt: 1,
+            lastError: 1,
           },
-        );
-      }
+        },
+      );
     }),
   );
 }
 
-/**
- * Persist call-ended notifications and instantly dispatch via Socket.IO.
- */
 export async function enqueueCallEndedNotifications(
   params: CommonNotificationParams & {
     payload: CallEndedPayload;
@@ -134,9 +145,22 @@ export async function enqueueCallEndedNotifications(
   const { workspaceId, callLogId, providerCallId, recipientUserIds, payload } =
     params;
 
-  if (recipientUserIds.length === 0) return;
-
+  const wsId = workspaceId.toString();
   const uniqueRecipientIds = getUniqueRecipientIds(recipientUserIds);
+
+  const socketData = {
+    notificationId: providerCallId,
+    workspaceId: wsId,
+    callId: providerCallId,
+    status: payload.endStatus,
+  };
+
+  if (uniqueRecipientIds.length === 0) {
+    const io = getCallSocketIO();
+
+    io?.to(`workspace_${wsId}`).emit("incoming-call-ended", socketData);
+    return;
+  }
 
   await CallNotificationOutbox.bulkWrite(
     uniqueRecipientIds.map((recipientUserId) => ({
@@ -156,8 +180,8 @@ export async function enqueueCallEndedNotifications(
             eventType: "CALL_ENDED",
             status: "PENDING",
             payload: {
-              workspaceId: payload.workspaceId,
-              callId: payload.callId,
+              workspaceId: wsId,
+              callId: providerCallId,
               endStatus: payload.endStatus,
             },
             attempts: 0,
@@ -167,17 +191,8 @@ export async function enqueueCallEndedNotifications(
         upsert: true,
       },
     })),
-    {
-      ordered: false,
-    },
+    { ordered: false },
   );
-
-  const socketData = {
-    notificationId: providerCallId,
-    workspaceId: workspaceId.toString(),
-    callId: providerCallId,
-    status: payload.endStatus,
-  };
 
   await Promise.allSettled(
     uniqueRecipientIds.map(async (recipientUserId) => {
@@ -186,22 +201,27 @@ export async function enqueueCallEndedNotifications(
         socketData,
       );
 
-      if (delivered) {
-        await CallNotificationOutbox.updateOne(
-          {
-            workspaceId,
-            providerCallId,
-            recipientUserId,
-            eventType: "CALL_ENDED",
+      if (!delivered) return;
+
+      await CallNotificationOutbox.updateOne(
+        {
+          workspaceId,
+          providerCallId,
+          recipientUserId,
+          eventType: "CALL_ENDED",
+        },
+        {
+          $set: {
+            status: "DELIVERED",
+            deliveredAt: new Date(),
           },
-          {
-            $set: {
-              status: "DELIVERED",
-              deliveredAt: new Date(),
-            },
+          $unset: {
+            processingAt: 1,
+            leaseExpiresAt: 1,
+            lastError: 1,
           },
-        );
-      }
+        },
+      );
     }),
   );
 }

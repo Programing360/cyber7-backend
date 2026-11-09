@@ -32,6 +32,13 @@ export interface ISubscription extends Document {
   };
   features: string[];
   history: ISubscriptionHistoryItem[];
+  cancelAtPeriodEnd?: boolean;
+  canceledAt?: Date | null;
+  cancellationReason?: string | null;
+  scheduledPlanChange?: {
+    planCode: PlanCode | string;
+    effectiveAt: Date;
+  } | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -47,8 +54,8 @@ const subscriptionSchema = new Schema<ISubscription>(
     },
     planCode: {
       type: String,
-      enum: ["STARTER", "BUSINESS_PRO", "ENTERPRISE"],
       required: true,
+      trim: true,
     },
     planName: {
       type: String,
@@ -108,6 +115,28 @@ const subscriptionSchema = new Schema<ISubscription>(
     features: {
       type: [String],
       default: [],
+    },
+    cancelAtPeriodEnd: {
+      type: Boolean,
+      default: false,
+    },
+    canceledAt: {
+      type: Date,
+      default: null,
+    },
+    cancellationReason: {
+      type: String,
+      default: null,
+    },
+    scheduledPlanChange: {
+      type: new Schema(
+        {
+          planCode: { type: String, required: true },
+          effectiveAt: { type: Date, required: true },
+        },
+        { _id: false },
+      ),
+      default: null,
     },
     history: [
       {

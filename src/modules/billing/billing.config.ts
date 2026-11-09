@@ -6,10 +6,10 @@
 export const CURRENCY = "BDT" as const;
 export const BILLING_CYCLE = "MONTHLY" as const;
 
-export type PlanCode = "STARTER" | "BUSINESS_PRO" | "ENTERPRISE";
+export type PlanCode = "STARTER" | "BUSINESS_PRO" | "ENTERPRISE" | (string & {});
 
 export interface PlanDefinition {
-  code: PlanCode;
+  code: string;
   name: string;
   priceBdt: number;
   description: string;
@@ -20,7 +20,7 @@ export interface PlanDefinition {
   features: string[];
 }
 
-export const BILLING_PLANS: Record<PlanCode, PlanDefinition> = {
+export const BILLING_PLANS: Record<string, PlanDefinition> = {
   STARTER: {
     code: "STARTER",
     name: "Starter",
@@ -76,6 +76,14 @@ export const BILLING_PLANS: Record<PlanCode, PlanDefinition> = {
     ],
   },
 };
+
+export function registerPlanInMemory(plan: PlanDefinition): void {
+  BILLING_PLANS[plan.code] = plan;
+}
+
+export function removePlanFromMemory(code: string): void {
+  delete BILLING_PLANS[code.toUpperCase()];
+}
 
 export const PAYMENT_METHODS = [
   "BKASH",

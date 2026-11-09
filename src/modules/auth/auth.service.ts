@@ -167,7 +167,7 @@ export const verifyRegistrationOtp = async (
   return {
     accessToken,
     tokenType: "Bearer",
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
+    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "7d",
     user: {
       id: user._id.toString(),
       name: user.name,
@@ -256,7 +256,7 @@ export const loginUser = async (input: LoginInput) => {
   return {
     accessToken,
     tokenType: "Bearer",
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
+    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "7d",
     user: {
       id: user._id.toString(),
       name: user.name,

@@ -25,6 +25,8 @@ export const createWorkspace = async (
 ) => {
   const session = await mongoose.startSession();
 
+  const normalizedName = input.name.trim().toLowerCase();
+
   try {
     let result: {
       id: string;
@@ -36,6 +38,18 @@ export const createWorkspace = async (
     } | null = null;
 
     await session.withTransaction(async () => {
+      // Check if workspace name already exists
+      const existingWorkspace = await Workspace.findOne({
+        nameNormalized: normalizedName,
+      }).session(session);
+
+      if (existingWorkspace) {
+        throw new AppError(
+          "Workspace already exists. Please choose another name.",
+          409,
+        );
+      }
+
       let workspace:
         | Awaited<ReturnType<typeof Workspace.create>>[number]
         | undefined;
@@ -48,7 +62,8 @@ export const createWorkspace = async (
           const created = await Workspace.create(
             [
               {
-                name: input.name,
+                name: input.name.trim(),
+                nameNormalized: normalizedName,
                 slug,
                 ownerId: userId,
               },
@@ -59,15 +74,27 @@ export const createWorkspace = async (
           workspace = created[0];
           break;
         } catch (error: unknown) {
-          const isDuplicate =
-            typeof error === "object" &&
-            error !== null &&
-            "code" in error &&
-            error.code === 11000;
+          const mongoError = error as {
+            code?: number;
+            keyPattern?: Record<string, number>;
+          };
 
-          if (!isDuplicate || attempt === 4) {
-            throw error;
+          if (mongoError.code === 11000) {
+            // Duplicate workspace name
+            if (mongoError.keyPattern?.nameNormalized) {
+              throw new AppError(
+                "Workspace already exists. Please choose another name.",
+                409,
+              );
+            }
+
+            // Retry only if slug already exists
+            if (mongoError.keyPattern?.slug && attempt < 4) {
+              continue;
+            }
           }
+
+          throw error;
         }
       }
 

@@ -19,18 +19,16 @@ export const authenticate = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
+    let token: string | undefined;
     const authorization = req.headers.authorization;
 
-    if (!authorization?.startsWith("Bearer ")) {
-      res.status(401).json({
-        success: false,
-        message: "Authentication token is required",
-      });
-
-      return;
+    if (authorization?.startsWith("Bearer ")) {
+      token = authorization.slice("Bearer ".length).trim();
+    } else if (typeof req.query?.token === "string" && req.query.token.trim()) {
+      token = req.query.token.trim();
+    } else if (req.cookies && (req.cookies.accessToken || req.cookies.token)) {
+      token = (req.cookies.accessToken || req.cookies.token) as string;
     }
-
-    const token = authorization.slice("Bearer ".length).trim();
 
     if (!token) {
       res.status(401).json({
@@ -44,13 +42,26 @@ export const authenticate = async (
     const payload = verifyAccessToken(token);
 
     const user = await User.findById(payload.sub).select(
-      "_id name email role platformRole isActive",
+      "_id name email role platformRole isActive tokenInvalidBefore",
     );
 
     if (!user || !user.isActive) {
       res.status(401).json({
         success: false,
         message: "Invalid authentication credentials",
+      });
+
+      return;
+    }
+
+    if (
+      user.tokenInvalidBefore &&
+      payload.iat &&
+      payload.iat * 1000 < new Date(user.tokenInvalidBefore).getTime()
+    ) {
+      res.status(401).json({
+        success: false,
+        message: "Session has been invalidated. Please sign in again.",
       });
 
       return;

@@ -35,6 +35,38 @@ export class PlatformAdminDashboardController {
     }
   }
 
+  async getAnalytics(
+    _req: AdminAuthenticatedRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const data = await platformAdminDashboardService.getAnalyticsMetrics();
+      res.status(200).json({
+        success: true,
+        data,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  async exportAnalyticsCsv(
+    _req: AdminAuthenticatedRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const csvData = await platformAdminDashboardService.generateAnalyticsCsv();
+      const filename = `platform-analytics-${new Date().toISOString().slice(0, 10)}.csv`;
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.status(200).send(csvData);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async listWorkspaces(
     req: AdminAuthenticatedRequest,
     res: Response,

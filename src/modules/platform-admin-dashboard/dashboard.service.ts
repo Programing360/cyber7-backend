@@ -156,6 +156,239 @@ export class PlatformAdminDashboardService {
   }
 
   /**
+   * Retrieves comprehensive platform analytics for growth, MRR, plan adoption, and payment distributions.
+   */
+  async getAnalyticsMetrics() {
+    const [
+      totalWorkspaces,
+      activeWorkspaces,
+      totalUsers,
+      trialUsers,
+      paidUsers,
+      activeSubs,
+      monthlyRevenueAgg,
+      plansBreakdownAgg,
+      paymentMethodAgg,
+      userMonthlyGrowthAgg,
+      workspaceMonthlyGrowthAgg,
+      totalRevenueAgg,
+    ] = await Promise.all([
+      Workspace.countDocuments().exec(),
+      Workspace.countDocuments({ status: "ACTIVE" }).exec(),
+      User.countDocuments().exec(),
+      User.countDocuments({
+        $or: [{ subscriptionStatus: "trial" }, { isPaid: false }],
+      }).exec(),
+      User.countDocuments({ isPaid: true }).exec(),
+      Subscription.find({ status: "ACTIVE" })
+        .select("price planCode")
+        .lean()
+        .exec(),
+      Payment.aggregate([
+        { $match: { status: "COMPLETED" } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
+            totalAmount: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]).exec(),
+      Subscription.aggregate([
+        { $match: { status: "ACTIVE" } },
+        {
+          $group: {
+            _id: "$planCode",
+            count: { $sum: 1 },
+            totalValue: { $sum: "$price" },
+          },
+        },
+      ]).exec(),
+      Payment.aggregate([
+        { $match: { status: "COMPLETED" } },
+        {
+          $group: {
+            _id: "$paymentMethod",
+            totalAmount: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { totalAmount: -1 } },
+      ]).exec(),
+      User.aggregate([
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]).exec(),
+      Workspace.aggregate([
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]).exec(),
+      Payment.aggregate([
+        { $match: { status: "COMPLETED" } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]).exec(),
+    ]);
+
+    const totalRevenueBdt = totalRevenueAgg[0]?.total || 0;
+    const monthlyRecurringRevenueBdt = activeSubs.reduce(
+      (sum, s) => sum + (s.price || 0),
+      0,
+    );
+    const totalActiveSubscriptions = activeSubs.length;
+    const averageRevenuePerAccount =
+      totalActiveSubscriptions > 0
+        ? Math.round(monthlyRecurringRevenueBdt / totalActiveSubscriptions)
+        : 0;
+
+    const planConfigMap: Record<string, { label: string; color: string }> = {
+      STARTER: { label: "Starter (৳3,000/mo)", color: "#0284c7" },
+      BUSINESS_PRO: { label: "Business Pro (৳7,400/mo)", color: "#10b981" },
+      ENTERPRISE: { label: "Enterprise (৳18,600/mo)", color: "#8b5cf6" },
+    };
+
+    const planDistribution = ["STARTER", "BUSINESS_PRO", "ENTERPRISE"].map(
+      (code) => {
+        const found = plansBreakdownAgg.find((p) => p._id === code);
+        const meta = planConfigMap[code];
+        return {
+          planCode: code,
+          name: meta.label,
+          value: found?.count || 0,
+          revenueBdt: found?.totalValue || 0,
+          color: meta.color,
+        };
+      },
+    );
+
+    const paymentMethodLabels: Record<string, string> = {
+      BKASH_DIRECT: "bKash Direct",
+      NAGAD_DIRECT: "Nagad Direct",
+      CITY_BANK_TRANSFER: "City Bank Transfer",
+      PORTPOS_CARD: "Debit / Credit Cards",
+      SSLCOMMERZ: "SSLCommerz Gateway",
+      STRIPE: "Stripe International",
+    };
+
+    const paymentMethods = paymentMethodAgg.map((item) => ({
+      method: item._id,
+      label: paymentMethodLabels[item._id] || item._id,
+      amount: item.totalAmount,
+      count: item.count,
+    }));
+
+    // Merge monthly user & workspace growth
+    const monthsSet = new Set<string>();
+    userMonthlyGrowthAgg.forEach((u) => monthsSet.add(u._id));
+    workspaceMonthlyGrowthAgg.forEach((w) => monthsSet.add(w._id));
+    monthlyRevenueAgg.forEach((r) => monthsSet.add(r._id));
+
+    const sortedMonths = Array.from(monthsSet).sort();
+    const growthTrend = sortedMonths.map((month) => {
+      const users =
+        userMonthlyGrowthAgg.find((u) => u._id === month)?.count || 0;
+      const workspaces =
+        workspaceMonthlyGrowthAgg.find((w) => w._id === month)?.count || 0;
+      const revItem = monthlyRevenueAgg.find((r) => r._id === month);
+      return {
+        month,
+        users,
+        workspaces,
+        revenue: revItem?.totalAmount || 0,
+        transactions: revItem?.count || 0,
+      };
+    });
+
+    return {
+      overview: {
+        totalRevenueBdt,
+        monthlyRecurringRevenueBdt,
+        totalActiveSubscriptions,
+        averageRevenuePerAccount,
+        totalUsers,
+        trialUsers,
+        paidUsers,
+        totalWorkspaces,
+        activeWorkspaces,
+      },
+      revenueTrend: monthlyRevenueAgg.map((m) => ({
+        month: m._id,
+        revenue: m.totalAmount,
+        count: m.count,
+      })),
+      planDistribution,
+      paymentMethods,
+      growthTrend,
+      source: "LIVE_BACKEND" as const,
+    };
+  }
+
+  /**
+   * Generates a downloadable CSV string representing the latest platform analytics.
+   */
+  async generateAnalyticsCsv(): Promise<string> {
+    const data = await this.getAnalyticsMetrics();
+
+    const lines: string[] = [];
+    lines.push("VEXCHAT PLATFORM ANALYTICS & GROWTH REPORT");
+    lines.push(`Generated At,${new Date().toISOString()}`);
+    lines.push(`Total Platform Revenue (BDT),${data.overview.totalRevenueBdt}`);
+    lines.push(
+      `Monthly Recurring Revenue (BDT),${data.overview.monthlyRecurringRevenueBdt}`,
+    );
+    lines.push(
+      `Total Active Subscriptions,${data.overview.totalActiveSubscriptions}`,
+    );
+    lines.push(
+      `Average Revenue Per Account (BDT),${data.overview.averageRevenuePerAccount}`,
+    );
+    lines.push(`Total Workspaces,${data.overview.totalWorkspaces}`);
+    lines.push(`Active Workspaces,${data.overview.activeWorkspaces}`);
+    lines.push(`Total Registered Users,${data.overview.totalUsers}`);
+    lines.push(`Free Trial Users,${data.overview.trialUsers}`);
+    lines.push(`Paid Converted Users,${data.overview.paidUsers}`);
+    lines.push("");
+
+    lines.push("--- MONTHLY PERFORMANCE & GROWTH ---");
+    lines.push("Month,Revenue (BDT),Transactions,New Workspaces,New Users");
+    for (const item of data.growthTrend) {
+      lines.push(
+        `"${item.month}",${item.revenue},${item.transactions},${item.workspaces},${item.users}`,
+      );
+    }
+    lines.push("");
+
+    lines.push("--- ACTIVE SUBSCRIPTION PLANS BREAKDOWN ---");
+    lines.push("Plan Code,Plan Label,Active Workspaces,Monthly Value (BDT)");
+    for (const plan of data.planDistribution) {
+      lines.push(
+        `"${plan.planCode}","${plan.name}",${plan.value},${plan.revenueBdt}`,
+      );
+    }
+    lines.push("");
+
+    lines.push("--- COMPLETED PAYMENTS BY METHOD ---");
+    lines.push(
+      "Method Code,Method Name,Completed Volume (BDT),Transactions Count",
+    );
+    for (const pm of data.paymentMethods) {
+      lines.push(`"${pm.method}","${pm.label}",${pm.amount},${pm.count}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  /**
    * Lists workspaces with search, status filters, and pagination.
    */
   async listWorkspaces(params: PaginationParams & { status?: string }) {

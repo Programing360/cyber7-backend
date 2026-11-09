@@ -39,7 +39,7 @@ describe("WhatsApp Calling — Status Semantics & Schema Integrity", () => {
     assert.ok(enumValues, "CallLog.status must define enumValues");
     for (const status of validStatuses) {
       assert.ok(
-        enumValues.includes(status),
+        enumValues?.includes(status),
         `CallStatus '${status}' must be in CallLog enum`,
       );
     }
@@ -73,7 +73,7 @@ describe("WhatsApp Calling — Status Semantics & Schema Integrity", () => {
     assert.ok(enumValues, "CallNotificationOutbox.status must define enumValues");
     for (const status of validOutboxStatuses) {
       assert.ok(
-        enumValues.includes(status),
+        enumValues?.includes(status),
         `CallNotificationStatus '${status}' must be in enum`,
       );
     }

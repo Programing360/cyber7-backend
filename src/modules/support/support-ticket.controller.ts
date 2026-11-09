@@ -1,0 +1,243 @@
+import type { Request, Response, NextFunction } from "express";
+import {
+  createTicketSchema,
+  updateTicketStatusSchema,
+  assignTicketSchema,
+  addTicketMessageSchema,
+  listTicketsQuerySchema,
+} from "./support-ticket.validation.js";
+import {
+  supportTicketService,
+  type AdminActorContext,
+} from "./support-ticket.service.js";
+
+function getAdminContext(req: Request): AdminActorContext {
+  const adminUser = (req as any).admin?.user;
+  const adminSession = (req as any).admin?.session;
+
+  return {
+    adminUserId: adminUser?._id,
+    adminEmail: adminUser?.email,
+    sessionId: adminSession?._id,
+    ipAddress:
+      req.ip || (req.headers["x-forwarded-for"] as string) || "127.0.0.1",
+    userAgent: req.headers["user-agent"] || "unknown",
+  };
+}
+
+export class SupportTicketController {
+  /**
+   * GET /api/platform-admin/support/tickets
+   */
+  async listTickets(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const parsed = listTicketsQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: "Invalid query parameters.",
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const result = await supportTicketService.listTickets(parsed.data);
+
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/platform-admin/support/tickets
+   */
+  async createTicket(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const parsed = createTicketSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: "Validation failed.",
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const actor = getAdminContext(req);
+      const ticket = await supportTicketService.createTicket(parsed.data, actor);
+
+      res.status(201).json({
+        success: true,
+        message: "Support ticket created successfully.",
+        data: ticket,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * PATCH /api/platform-admin/support/tickets/:ticketId/assign
+   */
+  async assignTicket(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const ticketId = String(req.params.ticketId || "").trim();
+      if (!ticketId) {
+        res.status(400).json({
+          success: false,
+          error: "Ticket ID is required.",
+        });
+        return;
+      }
+
+      const parsed = assignTicketSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: "Validation failed.",
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const actor = getAdminContext(req);
+      const ticket = await supportTicketService.assignTicket(
+        ticketId,
+        parsed.data.assignedAdminId,
+        actor,
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Ticket assigned successfully.",
+        data: ticket,
+      });
+    } catch (error: any) {
+      const msg = error?.message || "Failed to assign ticket";
+      if (msg.toLowerCase().includes("not found")) {
+        res.status(404).json({ success: false, error: msg });
+        return;
+      }
+      next(error);
+    }
+  }
+
+  /**
+   * PATCH /api/platform-admin/support/tickets/:ticketId/status
+   */
+  async updateStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const ticketId = String(req.params.ticketId || "").trim();
+      if (!ticketId) {
+        res.status(400).json({
+          success: false,
+          error: "Ticket ID is required.",
+        });
+        return;
+      }
+
+      const parsed = updateTicketStatusSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: "Validation failed.",
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const actor = getAdminContext(req);
+      const ticket = await supportTicketService.updateStatus(
+        ticketId,
+        parsed.data.status,
+        actor,
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Ticket status updated successfully.",
+        data: ticket,
+      });
+    } catch (error: any) {
+      const msg = error?.message || "Failed to update ticket status";
+      if (msg.toLowerCase().includes("not found")) {
+        res.status(404).json({ success: false, error: msg });
+        return;
+      }
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/platform-admin/support/tickets/:ticketId/messages
+   */
+  async addMessage(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const ticketId = String(req.params.ticketId || "").trim();
+      if (!ticketId) {
+        res.status(400).json({
+          success: false,
+          error: "Ticket ID is required.",
+        });
+        return;
+      }
+
+      const parsed = addTicketMessageSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: "Validation failed.",
+          details: parsed.error.issues,
+        });
+        return;
+      }
+
+      const actor = getAdminContext(req);
+      const ticket = await supportTicketService.addMessage(
+        ticketId,
+        parsed.data,
+        actor,
+      );
+
+      res.status(201).json({
+        success: true,
+        message: "Message added to ticket successfully.",
+        data: ticket,
+      });
+    } catch (error: any) {
+      const msg = error?.message || "Failed to add message to ticket";
+      if (msg.toLowerCase().includes("not found")) {
+        res.status(404).json({ success: false, error: msg });
+        return;
+      }
+      next(error);
+    }
+  }
+}
+
+export const supportTicketController = new SupportTicketController();
+

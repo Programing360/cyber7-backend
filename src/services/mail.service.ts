@@ -1,9 +1,16 @@
 import nodemailer from "nodemailer";
 
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+}
+
 export interface SendMailOptions {
   to: string;
   subject: string;
   html: string;
+  attachments?: EmailAttachment[];
 }
 
 /**
@@ -36,6 +43,7 @@ export async function sendEmail({
   to,
   subject,
   html,
+  attachments,
 }: SendMailOptions): Promise<boolean> {
   try {
     const transporter = createTransporter();
@@ -54,6 +62,7 @@ export async function sendEmail({
       to,
       subject,
       html,
+      attachments,
     });
 
     // console.log(

@@ -5,6 +5,7 @@ import axios from "axios";
 import CallLog from "../Calling/CallLog.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
+import { decrypt } from "../../utils/encryption.js";
 
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -48,10 +49,13 @@ export const getCallLogs = async (
   res: Response,
 ): Promise<Response> => {
   try {
+    console.log("🔥 Webhook hit:", req.body);
     const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
-
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
+    console.log(workspaceId);
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
         success: false,
@@ -144,20 +148,24 @@ export const getCallLogs = async (
         limit: limitNum,
         totalPages: Math.ceil(totalCount / limitNum),
       },
-      data: logs.map((log) => ({
-        id: log._id.toString(),
-        name: log.callerName || "Unknown",
-        phone: log.phoneNumber,
-        type: log.callType,
-        status: log.status,
-        providerCallId: log.providerCallId ?? null,
-        callSid: log.callSid ?? null,
-        startedAt: log.startedAt ?? null,
-        endedAt: log.endedAt ?? null,
-        timestamp: safeToISOString(log.startedAt),
-        duration: formatDuration(log.durationSeconds),
-        durationSeconds: log.durationSeconds ?? 0,
-      })),
+      data: logs.map((log) => {
+        const documentId = log._id.toString();
+        return {
+          id: documentId,
+          name: log.callerName || "Unknown",
+          phone: log.phoneNumber,
+          type: log.callType,
+          status: log.status,
+          providerCallId: log.providerCallId ?? null,
+          // 🔥 ফিক্স: log.callSid না থাকলে ডকুমেন্টের নিজস্ব _id বসবে
+          callSid: log.callSid || documentId,
+          startedAt: log.startedAt ?? null,
+          endedAt: log.endedAt ?? null,
+          timestamp: safeToISOString(log.startedAt),
+          duration: formatDuration(log.durationSeconds),
+          durationSeconds: log.durationSeconds ?? 0,
+        };
+      }),
     });
   } catch (error) {
     console.error("[Calling] Get call logs failed:", error);
@@ -176,10 +184,13 @@ export const startOutgoingCall = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
+  console.log("🔥 Webhook hit:", req.body, "2");
   try {
     const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
     const userId = req.user?.id;
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
@@ -211,12 +222,21 @@ export const startOutgoingCall = async (
       });
     }
 
+    if (!sdpOffer || typeof sdpOffer !== "string") {
+      return res.status(400).json({
+        success: false,
+        code: "SDP_OFFER_REQUIRED",
+        message:
+          "A valid WebRTC SDP offer is required to initiate a WhatsApp call.",
+      });
+    }
+
     // ১. ওয়ার্কস্পেসের WhatsApp অ্যাকাউন্ট ক্রেডেনশিয়াল রিট্রিভ করা
     const account = await WhatsAppAccount.findOne({
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
       status: "CONNECTED",
     })
-      .select("phoneNumberId accessToken")
+      .select("phoneNumberId +accessTokenEncrypted")
       .lean();
 
     if (!account) {
@@ -228,10 +248,24 @@ export const startOutgoingCall = async (
       });
     }
 
-    const token =
-      (account as any).accessToken ||
-      process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-      process.env.WHATSAPP_ACCESS_TOKEN;
+    let token: string | undefined;
+    if (account.accessTokenEncrypted) {
+      try {
+        token = decrypt(account.accessTokenEncrypted);
+      } catch (decryptErr) {
+        console.error(
+          "[Calling] Failed to decrypt WhatsApp account access token:",
+          decryptErr,
+        );
+      }
+    }
+
+    if (!token) {
+      token =
+        process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+        process.env.META_SYSTEM_USER_TOKEN ||
+        process.env.WHATSAPP_ACCESS_TOKEN;
+    }
 
     const phoneNumberId =
       account.phoneNumberId || process.env.TEST_PHONE_NUMBER_ID;
@@ -253,14 +287,11 @@ export const startOutgoingCall = async (
         messaging_product: "whatsapp",
         to: cleanPhone,
         action: "connect",
-      };
-
-      if (sdpOffer) {
-        metaPayload.session = {
+        session: {
           sdp_type: "offer",
           sdp: sdpOffer,
-        };
-      }
+        },
+      };
 
       const metaResponse = await axios.post(
         `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
@@ -273,12 +304,19 @@ export const startOutgoingCall = async (
         },
       );
 
-      providerCallId = metaResponse.data?.id || metaResponse.data?.call_id;
-      metaSessionData = metaResponse.data?.session ?? null;
+      providerCallId =
+        metaResponse.data?.id ||
+        metaResponse.data?.call_id ||
+        metaResponse.data?.calls?.[0]?.id;
+      metaSessionData =
+        metaResponse.data?.session ??
+        metaResponse.data?.calls?.[0]?.session ??
+        null;
     } catch (metaError: any) {
       console.error(
         "[Meta Outgoing Call Error]:",
         metaError.response?.data || metaError.message,
+        JSON.stringify(metaError.response?.data || metaError.message, null, 2),
       );
 
       const errorMessage =
@@ -292,17 +330,25 @@ export const startOutgoingCall = async (
       });
     }
 
+
     // ৩. ডাটাবেজে OUTGOING CallLog তৈরি করা
+    const callLogId = new mongoose.Types.ObjectId();
+
     const callLog = await CallLog.create({
+      _id: callLogId,
       workspaceId: new mongoose.Types.ObjectId(workspaceId),
       phoneNumber: cleanPhone,
       callerName: callerName || "Unknown",
       callType: "OUTGOING",
       status: "RINGING",
       providerCallId: providerCallId || `outgoing_${Date.now()}`,
+      callSid: callLogId.toString(), // 🔥 ফিক্স: callSid হিসেবে MongoDB ID সেভ করা
       phoneNumberId,
       startedAt: new Date(),
-      assignedTo: userId && mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : undefined,
+      assignedTo:
+        userId && mongoose.Types.ObjectId.isValid(userId)
+          ? new mongoose.Types.ObjectId(userId)
+          : undefined,
       durationSeconds: 0,
       ringingUserIds: [],
     });
@@ -312,6 +358,7 @@ export const startOutgoingCall = async (
       data: {
         id: callLog._id.toString(),
         callId: callLog.providerCallId,
+        callSid: callLog.callSid, // ফ্রন্টএন্ডের জন্য স্পষ্ট রিটার্ন
         status: callLog.status,
         session: metaSessionData,
       },
@@ -333,10 +380,13 @@ export const endCallSession = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
+  console.log("🔥 Webhook hit:", req.body, "3");
   try {
     const workspaceId =
       req.workspace?.id ??
-      (typeof req.params.workspaceId === "string" ? req.params.workspaceId : undefined);
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined);
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
@@ -390,9 +440,9 @@ export const endCallSession = async (
         ? Math.floor(duration)
         : call.startedAt
           ? Math.max(
-            0,
-            Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
-          )
+              0,
+              Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
+            )
           : 0;
 
     // মেটাতে টার্মিনেশন রিকোয়েস্ট পাঠানো (যদি কলটি এখনও সক্রিয় থাকে)
@@ -401,13 +451,27 @@ export const endCallSession = async (
         workspaceId: call.workspaceId,
         status: "CONNECTED",
       })
-        .select("phoneNumberId accessToken")
+        .select("phoneNumberId +accessTokenEncrypted")
         .lean();
 
-      const token =
-        (account as any)?.accessToken ||
-        process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-        process.env.WHATSAPP_ACCESS_TOKEN;
+      let token: string | undefined;
+      if (account?.accessTokenEncrypted) {
+        try {
+          token = decrypt(account.accessTokenEncrypted);
+        } catch (decryptErr) {
+          console.error(
+            "[Calling] Failed to decrypt account token for endCall:",
+            decryptErr,
+          );
+        }
+      }
+
+      if (!token) {
+        token =
+          process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+          process.env.META_SYSTEM_USER_TOKEN ||
+          process.env.WHATSAPP_ACCESS_TOKEN;
+      }
 
       const targetPhoneNumberId =
         call.phoneNumberId ||

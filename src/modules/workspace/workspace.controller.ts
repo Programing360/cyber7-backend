@@ -41,6 +41,8 @@ export const createWorkspaceController = async (
       return;
     }
 
+    
+
     const workspace = await createWorkspace(req.user.id, validation.data);
 
     res.status(201).json({

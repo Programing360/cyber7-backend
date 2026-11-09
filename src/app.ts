@@ -21,6 +21,9 @@ import {
 
 import adminAuthRouter from "./modules/admin-auth/admin-auth.routes.js";
 import platformAdminDashboardRouter from "./modules/platform-admin-dashboard/dashboard.routes.js";
+import platformAdminGovernanceRouter from "./modules/platform-admin-dashboard/governance.routes.js";
+import supportTicketRouter from "./modules/support/support-ticket.routes.js";
+import platformSettingsRouter from "./modules/settings/platform-settings.routes.js";
 
 import { errorHandler } from "./middlewares/error-handler.js";
 
@@ -33,6 +36,13 @@ import {
 import callingRoutes, {
   internalCronRouter,
 } from "./modules/Calling/calling.routes.js";
+import {
+  getWhatsAppMediaStreamController,
+  sendWhatsAppMediaMessageController,
+} from "./modules/whatsapp/whatsapp.controller.js";
+import { authenticate } from "./middlewares/authenticate.js";
+import { requireWorkspaceMembership } from "./middlewares/require-workspace-membership.js";
+import { requireRole } from "./middlewares/require-role.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -144,13 +154,40 @@ app.use("/api", internalCronRouter);
 
 // Workspace and billing.
 app.use("/api/workspaces", workspaceRouter);
+
+// Workspace WhatsApp Media and Messaging Routes (drop-in aliases for frontend convenience)
+app.get(
+  "/api/workspaces/:workspaceId/whatsapp/media/:mediaId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getWhatsAppMediaStreamController,
+);
+app.post(
+  "/api/workspaces/:workspaceId/whatsapp/messages/media",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  sendWhatsAppMediaMessageController,
+);
 app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
 app.use("/api/admin/billing", platformAdminBillingRouter);
+app.use("/api/platform-admin/billing", platformAdminBillingRouter);
 
 // Platform administrator.
 app.use("/api/platform-admin/auth", adminAuthRouter);
 app.use("/api/platform-admin/dashboard", platformAdminDashboardRouter);
+app.use("/api/platform-admin", platformAdminGovernanceRouter);
+app.use("/api/admin", platformAdminGovernanceRouter);
+
+// Platform Support Desk.
+app.use("/api/platform-admin/support", supportTicketRouter);
+app.use("/api/admin/support", supportTicketRouter);
+
+// Platform Dynamic System Settings.
+app.use("/api/platform-admin/settings", platformSettingsRouter);
+app.use("/api/admin/settings", platformSettingsRouter);
 
 // Invitations.
 app.use("/api/invitations", invitationRouter);

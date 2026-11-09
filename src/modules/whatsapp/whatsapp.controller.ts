@@ -20,6 +20,8 @@ import { AppError } from "../../utils/app-error.js";
 import {
   sendWhatsAppTextMessage,
   sendWhatsAppTemplateMessage,
+  getWhatsAppMediaStream,
+  sendWhatsAppMediaMessage,
 } from "../services/whatsapp-message.service.js";
 import { recordWebhookVerificationSuccess } from "./meta-platform-config.model.js";
 
@@ -431,6 +433,108 @@ export async function getWhatsAppConfigStatusController(
     return res.status(200).json({
       success: true,
       data: configStatus,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/workspaces/:workspaceId/whatsapp/media/:mediaId
+ * or /api/whatsapp/:workspaceId/media/:mediaId
+ *
+ * Implements Issue 3: Authenticated Media Streaming Proxy
+ */
+export async function getWhatsAppMediaStreamController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
+    const mediaId = req.params.mediaId as string;
+
+    if (!workspaceId) {
+      throw new AppError("Workspace ID is required", 400);
+    }
+    if (!mediaId) {
+      throw new AppError("Media ID is required", 400);
+    }
+
+    const { stream, contentType, contentLength } = await getWhatsAppMediaStream({
+      workspaceId,
+      mediaId,
+    });
+
+    res.setHeader("Content-Type", contentType);
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+
+    (stream as NodeJS.ReadableStream).pipe(res);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/workspaces/:workspaceId/whatsapp/messages/media
+ * or /api/whatsapp/:workspaceId/messages/media
+ *
+ * Implements Issue 3: Outbound Image / Video Message Sending
+ */
+export async function sendWhatsAppMediaMessageController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
+
+    if (!req.user?.id) {
+      throw new AppError("Unauthorized", 401);
+    }
+    if (!workspaceId) {
+      throw new AppError("Workspace ID is required", 400);
+    }
+
+    const {
+      conversationId,
+      type,
+      fileBase64,
+      mediaUrl,
+      filename,
+      mimeType,
+      caption,
+    } = req.body || {};
+
+    if (!conversationId) {
+      throw new AppError("Conversation ID is required", 400);
+    }
+    if (!type || (type !== "IMAGE" && type !== "VIDEO")) {
+      throw new AppError("Valid media type (IMAGE or VIDEO) is required", 400);
+    }
+    if (!fileBase64 && !mediaUrl) {
+      throw new AppError("Either fileBase64 or mediaUrl must be provided", 400);
+    }
+
+    const message = await sendWhatsAppMediaMessage({
+      workspaceId,
+      conversationId,
+      senderId: req.user.id,
+      type,
+      fileBase64,
+      mediaUrl,
+      filename,
+      mimeType,
+      caption,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Media message sent successfully",
+      data: message,
     });
   } catch (error) {
     next(error);

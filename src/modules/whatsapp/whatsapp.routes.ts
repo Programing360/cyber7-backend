@@ -9,6 +9,8 @@ import {
   getWhatsAppConfigStatusController,
   sendWhatsAppMessage,
   sendWhatsAppTemplateMessageController,
+  getWhatsAppMediaStreamController,
+  sendWhatsAppMediaMessageController,
 } from "./whatsapp.controller.js";
 
 import {
@@ -208,6 +210,24 @@ whatsappRoutes.post(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   sendWhatsAppTemplateMessageController,
+);
+
+// Outbound Media Message Route (Images / Videos)
+whatsappRoutes.post(
+  "/:workspaceId/messages/media",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  sendWhatsAppMediaMessageController,
+);
+
+// Media Streaming Proxy Route (Images / Videos stream directly from Meta Cloud CDN)
+whatsappRoutes.get(
+  "/:workspaceId/media/:mediaId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getWhatsAppMediaStreamController,
 );
 
 // Template Routes

@@ -1,5 +1,8 @@
 import { Types } from "mongoose";
+import axios from "axios";
 import { AppError } from "../../utils/app-error.js";
+import { decrypt } from "../../utils/encryption.js";
+import { getCallSocketIO } from "../../sockets/callSocket.js";
 import WhatsAppContact from "../whatsapp/contact.model.js";
 import WhatsAppConversation, {
   CUSTOMER_SERVICE_WINDOW_MS,
@@ -827,6 +830,282 @@ export async function sendWhatsAppTemplateMessage({
     conversation.status = "OPEN";
   }
   await conversation.save();
+
+  return savedMessage;
+}
+
+/**
+ * Streams media (image, video, audio, document) from Meta Graph API.
+ *
+ * Implements Issue 3: Backend Media Proxy
+ */
+export async function getWhatsAppMediaStream({
+  workspaceId,
+  mediaId,
+}: {
+  workspaceId: string;
+  mediaId: string;
+}): Promise<{ stream: NodeJS.ReadableStream; contentType: string; contentLength?: number }> {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("Invalid workspace ID", 400);
+  }
+  if (!mediaId || typeof mediaId !== "string") {
+    throw new AppError("Media ID is required", 400);
+  }
+
+  // 1. Find connected WhatsApp account
+  const account = await WhatsAppAccount.findOne({
+    workspaceId: new Types.ObjectId(workspaceId),
+    status: "CONNECTED",
+  }).select("+accessTokenEncrypted");
+
+  if (!account || !account.accessTokenEncrypted) {
+    throw new AppError("No active WhatsApp account connected for this workspace", 404);
+  }
+
+  let token: string;
+  try {
+    token = decrypt(account.accessTokenEncrypted);
+  } catch {
+    throw new AppError("Failed to decrypt WhatsApp account credentials", 500);
+  }
+
+  // 2. Fetch media URL from Meta Graph API: GET https://graph.facebook.com/v21.0/{media_id}
+  const metaInfoRes = await axios.get(`https://graph.facebook.com/v21.0/${mediaId}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    timeout: 15000,
+  });
+
+  const mediaUrl = metaInfoRes.data?.url;
+  const mimeType = metaInfoRes.data?.mime_type || "application/octet-stream";
+  const fileSize = metaInfoRes.data?.file_size;
+
+  if (!mediaUrl) {
+    throw new AppError("Meta Graph API did not return a media URL", 502);
+  }
+
+  // 3. Fetch media binary stream from Meta CDN using Bearer token
+  const mediaStreamRes = await axios.get(mediaUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "curl/7.64.1",
+    },
+    responseType: "stream",
+    timeout: 30000,
+  });
+
+  return {
+    stream: mediaStreamRes.data,
+    contentType: mimeType,
+    contentLength: typeof fileSize === "number" ? fileSize : undefined,
+  };
+}
+
+export interface SendWhatsAppMediaMessageParams {
+  workspaceId: string;
+  conversationId: string;
+  senderId: string;
+  type: "IMAGE" | "VIDEO";
+  fileBase64?: string;
+  mediaUrl?: string;
+  filename?: string;
+  mimeType?: string;
+  caption?: string;
+}
+
+/**
+ * Sends an outbound image or video to a WhatsApp contact via Meta Messages API.
+ *
+ * Implements Issue 3: Backend Outbound Media
+ */
+export async function sendWhatsAppMediaMessage({
+  workspaceId,
+  conversationId,
+  senderId,
+  type,
+  fileBase64,
+  mediaUrl,
+  filename,
+  mimeType,
+  caption,
+}: SendWhatsAppMediaMessageParams) {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("Valid workspace ID is required", 400);
+  }
+  if (!Types.ObjectId.isValid(conversationId)) {
+    throw new AppError("Valid conversation ID is required", 400);
+  }
+
+  const conversation = await WhatsAppConversation.findOne({
+    _id: conversationId,
+    workspaceId,
+  });
+
+  if (!conversation) {
+    throw new AppError("Conversation not found", 404);
+  }
+
+  if (conversation.status === "CLOSED") {
+    throw new AppError("Conversation is closed", 400);
+  }
+
+  const contact = await WhatsAppContact.findOne({
+    _id: conversation.contactId,
+    workspaceId,
+  });
+
+  if (!contact) {
+    throw new AppError("Contact not found", 404);
+  }
+
+  if (contact.isOptedOut) {
+    throw new AppError("This contact has opted out of WhatsApp messages.", 422, "CONTACT_OPTED_OUT");
+  }
+
+  // Server-side enforcement of 24-hour Customer Service Window
+  if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
+    throw new AppError(
+      "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
+      422,
+      "CUSTOMER_SERVICE_WINDOW_EXPIRED",
+    );
+  }
+
+  const account = await WhatsAppAccount.findOne({
+    _id: conversation.whatsappAccountId,
+    workspaceId,
+    status: "CONNECTED",
+  }).select("+accessTokenEncrypted");
+
+  if (!account || !account.accessTokenEncrypted) {
+    throw new AppError("WhatsApp account not connected", 404);
+  }
+
+  let token: string;
+  try {
+    token = decrypt(account.accessTokenEncrypted);
+  } catch {
+    throw new AppError("Failed to decrypt WhatsApp account credentials", 500);
+  }
+
+  const rawRecipient = contact.waId || contact.phoneNumber || "";
+  const recipientPhone = rawRecipient.replace(/\D/g, "");
+
+  if (!recipientPhone || recipientPhone.length < 5) {
+    throw new AppError("Contact does not have a valid WhatsApp phone number", 400);
+  }
+
+  let metaMediaId: string | undefined = undefined;
+  const determinedMime = mimeType || (type === "VIDEO" ? "video/mp4" : "image/jpeg");
+
+  // If base64 file data was sent, upload to Meta Media API first
+  if (fileBase64) {
+    const rawData = fileBase64.replace(/^data:[^;]+;base64,/, "");
+    const buffer = Buffer.from(rawData, "base64");
+
+    const formData = new FormData();
+    formData.append("messaging_product", "whatsapp");
+    formData.append("type", determinedMime);
+    formData.append(
+      "file",
+      new Blob([buffer], { type: determinedMime }),
+      filename || (type === "VIDEO" ? `video-${Date.now()}.mp4` : `image-${Date.now()}.jpg`),
+    );
+
+    const uploadRes = await axios.post(
+      `https://graph.facebook.com/v21.0/${account.phoneNumberId}/media`,
+      formData,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+
+    metaMediaId = uploadRes.data?.id;
+    if (!metaMediaId) {
+      throw new AppError("Failed to upload media to Meta Graph API", 502);
+    }
+  }
+
+  if (!metaMediaId && !mediaUrl) {
+    throw new AppError("Either fileBase64 or mediaUrl must be provided", 400);
+  }
+
+  // Send message via Meta WhatsApp Messages API
+  const mediaKey = type.toLowerCase() as "image" | "video";
+  const mediaPayload: Record<string, unknown> = metaMediaId
+    ? { id: metaMediaId }
+    : { link: mediaUrl };
+
+  if (caption && caption.trim()) {
+    mediaPayload.caption = caption.trim();
+  }
+
+  const apiResponse = await makeWorkspaceWhatsAppRequest(
+    workspaceId,
+    account.phoneNumberId,
+    "messages",
+    {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: mediaKey,
+      [mediaKey]: mediaPayload,
+    },
+  );
+
+  const metaMsgId = (apiResponse.messages as Array<{ id?: string }> | undefined)?.[0]?.id;
+  if (!metaMsgId) {
+    throw new AppError("WhatsApp API did not return a message ID", 502);
+  }
+
+  // Save to DB
+  const savedMessage = await WhatsAppMessage.create({
+    workspaceId,
+    conversationId: conversation._id,
+    contactId: contact._id,
+    whatsappAccountId: account._id,
+    waMessageId: metaMsgId,
+    direction: "OUTBOUND",
+    type: type.toUpperCase() as "IMAGE" | "VIDEO",
+    status: "SENT",
+    text: caption?.trim() || "",
+    mediaId: metaMediaId,
+    mediaMimeType: determinedMime,
+    senderId,
+    timestamp: new Date(),
+  });
+
+  conversation.lastMessageAt = savedMessage.timestamp;
+  await conversation.save();
+
+  // Broadcast to Socket.IO ("new-message")
+  const io = getCallSocketIO();
+  if (io) {
+    const wsId = workspaceId.toString();
+    const payload = {
+      _id: savedMessage._id.toString(),
+      workspaceId: wsId,
+      conversationId: conversation._id.toString(),
+      contactId: contact._id.toString(),
+      whatsappAccountId: account._id.toString(),
+      direction: savedMessage.direction,
+      type: savedMessage.type,
+      status: savedMessage.status,
+      text: savedMessage.text,
+      mediaId: savedMessage.mediaId,
+      mediaMimeType: savedMessage.mediaMimeType,
+      timestamp: savedMessage.timestamp.toISOString(),
+      createdAt: (savedMessage as any).createdAt
+        ? (savedMessage as any).createdAt.toISOString()
+        : savedMessage.timestamp.toISOString(),
+    };
+    io.to(wsId).emit("new-message", payload);
+    io.to(`workspace_${wsId}`).emit("new-message", payload);
+  }
 
   return savedMessage;
 }

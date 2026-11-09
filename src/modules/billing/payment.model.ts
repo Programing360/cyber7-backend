@@ -22,6 +22,13 @@ export interface IBankTransferDetails {
   rejectionReason?: string;
 }
 
+export interface IRefundMetadata {
+  refundedAt?: Date;
+  refundedBy?: Types.ObjectId;
+  refundReason?: string;
+  refundAmount?: number;
+}
+
 export interface IGatewayData {
   trxID?: string;
   paymentID?: string;
@@ -43,6 +50,7 @@ export interface IPayment extends Document {
   idempotencyKey: string;
   invoiceNumber: string;
   gatewayData?: IGatewayData;
+  refundMetadata?: IRefundMetadata;
   failureReason?: string;
   completedAt?: Date;
   createdAt: Date;
@@ -134,6 +142,12 @@ const paymentSchema = new Schema<IPayment>(
         rejectionReason: { type: String, trim: true },
       },
       rawGatewayResponse: { type: Schema.Types.Mixed },
+    },
+    refundMetadata: {
+      refundedAt: { type: Date },
+      refundedBy: { type: Schema.Types.ObjectId, ref: "User" },
+      refundReason: { type: String, trim: true },
+      refundAmount: { type: Number, min: 0 },
     },
     failureReason: {
       type: String,

@@ -7,7 +7,11 @@ import mongoose, {
 
 export type CallNotificationEvent = "INCOMING_CALL" | "CALL_ENDED";
 
-export type CallNotificationStatus = "PENDING" | "PROCESSING" | "DELIVERED" | "FAILED";
+export type CallNotificationStatus =
+  | "PENDING"
+  | "PROCESSING"
+  | "DELIVERED"
+  | "FAILED";
 
 export interface ICallNotificationOutbox {
   workspaceId: Types.ObjectId;
@@ -24,6 +28,8 @@ export interface ICallNotificationOutbox {
     callId: string;
     name?: string;
     phone?: string;
+    sdpOffer?: string;
+    phoneNumberId?: string;
     endStatus?: "MISSED" | "REJECTED" | "ENDED";
   };
 
@@ -98,6 +104,14 @@ const callNotificationOutboxSchema = new Schema<ICallNotificationOutbox>(
       },
       phone: {
         type: String,
+      },
+
+      sdpOffer: {
+        type: String,
+      },
+      phoneNumberId: {
+        type: String,
+        trim: true,
       },
       endStatus: {
         type: String,

@@ -5,13 +5,21 @@ import User from "../modules/auth/user.model.js";
 import Workspace from "../modules/workspace/workspace.model.js";
 import Membership from "../modules/workspace/membership.model.js";
 import CallLog from "../modules/Calling/CallLog.js";
-import { acceptMetaCallWithSdp } from "../services/whatsapp-calling-webhook.service.js";
 import WhatsAppAccount from "../modules/whatsapp/whatsapp.model.js";
-
+import {
+  acceptMetaCallWithSdp,
+  terminateMetaCall,
+  initiateMetaOutgoingCall,
+} from "../services/whatsapp-calling-webhook.service.js";
 import { verifyAccessToken } from "../utils/jwt.js";
- import { terminateMetaCall } from "../services/whatsapp-calling-webhook.service.js";
+import { decrypt } from "../utils/encryption.js";
+
 export interface ServerToClientEvents {
-  "call-dialing": (data: { targetPhone: string; callerName: string }) => void;
+  "call-dialing": (data: {
+    targetPhone: string;
+    callerName: string;
+    callId?: string;
+  }) => void;
 
   "incoming-call": (
     data: {
@@ -22,6 +30,7 @@ export interface ServerToClientEvents {
       callSid: string;
       workspaceId: string;
       sdpOffer?: string;
+      phoneNumberId?: string;
     },
     ack?: (
       error: Error | null,
@@ -72,6 +81,23 @@ export interface ServerToClientEvents {
     candidate: RTCIceCandidateInit;
   }) => void;
 
+  "new-message": (data: {
+    _id: string;
+    workspaceId: string;
+    conversationId: string;
+    contactId: string;
+    whatsappAccountId: string;
+    direction: string;
+    type: string;
+    status: string;
+    text?: string;
+    mediaId?: string;
+    mediaMimeType?: string;
+    callLogId?: string;
+    timestamp: string;
+    createdAt: string;
+  }) => void;
+
   "call-terminated": (data: { workspaceId: string; callId?: string }) => void;
 
   "call-ended": (data: { callSid: string }) => void;
@@ -82,17 +108,23 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   "join-workspace": (workspaceId: string) => void;
 
-  "answer-incoming-call": (data: {
-    workspaceId: string;
-    callId: string;
-    sdpAnswer?: string;
-  }) => void;
+  "answer-incoming-call": (
+    data: { workspaceId: string; callId: string; sdpAnswer?: string },
+    ack?: (error: Error | null, response?: { accepted: boolean }) => void,
+  ) => void;
 
-  "initiate-call": (data: {
-    workspaceId: string;
-    targetPhone: string;
-    callerName: string;
-  }) => void;
+  "initiate-call": (
+    data: {
+      workspaceId: string;
+      targetPhone: string;
+      callerName?: string;
+      sdpOffer?: string;
+    },
+    ack?: (
+      error: Error | null,
+      response?: { accepted: boolean; callId?: string },
+    ) => void,
+  ) => void;
 
   "webrtc-offer": (data: {
     workspaceId: string;
@@ -135,9 +167,17 @@ type CallSocketServer = Server<
 
 const USER_ROOM_PREFIX = "user_";
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __CALL_SOCKET_IO__: CallSocketServer | null | undefined;
+}
+
 let callSocketIO: CallSocketServer | null = null;
 
-export const getCallSocketIO = (): CallSocketServer | null => callSocketIO;
+// 🔥 একক এবং নিরাপদ গ্লোবাল রিটার্ন (কোনও ডুপ্লিকেট ডিক্লেয়ারেশন নেই)
+export const getCallSocketIO = (): CallSocketServer | null => {
+  return globalThis.__CALL_SOCKET_IO__ ?? callSocketIO ?? null;
+};
 
 const getUserRoom = (userId: string): string => `${USER_ROOM_PREFIX}${userId}`;
 
@@ -176,9 +216,6 @@ const emitSocketError = (
 const isValidObjectId = (value: unknown): value is string =>
   typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
 
-/**
- * Authorize workspace membership.
- */
 const authorizeWorkspace = async (
   socket: CallSocket,
   workspaceId: unknown,
@@ -189,7 +226,6 @@ const authorizeWorkspace = async (
       "INVALID_WORKSPACE_ID",
       "A valid workspace ID is required.",
     );
-
     return false;
   }
 
@@ -198,12 +234,10 @@ const authorizeWorkspace = async (
       _id: socket.data.userId,
       isActive: true,
     }),
-
     Workspace.exists({
       _id: workspaceId,
       status: "ACTIVE",
     }),
-
     Membership.exists({
       workspaceId,
       userId: socket.data.userId,
@@ -236,6 +270,7 @@ type IncomingCallNotificationData = {
   name: string;
   phone: string;
   sdpOffer?: string;
+  phoneNumberId?: string;
 };
 
 type CallEndedNotificationData = {
@@ -247,22 +282,18 @@ type CallEndedNotificationData = {
 
 const SOCKET_NOTIFICATION_ACK_TIMEOUT = 5000;
 
-/**
- * Deliver an incoming-call notification directly to a user's private room.
- */
 export function deliverIncomingCallNotification(
   userId: string,
   data: IncomingCallNotificationData,
 ): Promise<boolean> {
-  if (!callSocketIO || !isValidObjectId(userId)) {
+  const io = getCallSocketIO();
+  if (!io || !isValidObjectId(userId)) {
     return Promise.resolve(false);
   }
 
   return new Promise((resolve) => {
     (
-      callSocketIO!
-        .to(getUserRoom(userId))
-        .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
+      io.to(getUserRoom(userId)).timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
     ).emit("incoming-call", data, (error: any, responses: any) => {
       const responseList = Array.isArray(responses) ? responses : [responses];
       const acknowledged = responseList.some(
@@ -279,22 +310,18 @@ export function deliverIncomingCallNotification(
   });
 }
 
-/**
- * Deliver a call-ended notification to a user's private room.
- */
 export function deliverCallEndedNotification(
   userId: string,
   data: CallEndedNotificationData,
 ): Promise<boolean> {
-  if (!callSocketIO || !isValidObjectId(userId)) {
+  const io = getCallSocketIO();
+  if (!io || !isValidObjectId(userId)) {
     return Promise.resolve(false);
   }
 
   return new Promise((resolve) => {
     (
-      callSocketIO!
-        .to(getUserRoom(userId))
-        .timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
+      io.to(getUserRoom(userId)).timeout(SOCKET_NOTIFICATION_ACK_TIMEOUT) as any
     ).emit("incoming-call-ended", data, (error: any, responses: any) => {
       const responseList = Array.isArray(responses) ? responses : [responses];
       const acknowledged = responseList.some(
@@ -311,11 +338,12 @@ export function deliverCallEndedNotification(
   });
 }
 
-/**
- * Initialize authenticated Call Socket.IO server.
- */
 export const initCallSocket = (io: CallSocketServer): void => {
   callSocketIO = io;
+  globalThis.__CALL_SOCKET_IO__ = io; // 🔥 নিশ্চিত গ্লোবাল রেফারেন্স সংরক্ষণ
+  console.info(
+    "✅ [Call Socket] Global callSocketIO initialized successfully.",
+  );
 
   io.use(async (socket, next) => {
     try {
@@ -355,7 +383,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
     const authenticatedSocket = socket as CallSocket;
     const userId = authenticatedSocket.data.userId;
 
-    // Join private user room
     void authenticatedSocket.join(getUserRoom(userId));
 
     authenticatedSocket.on("join-workspace", async (workspaceId) => {
@@ -369,9 +396,11 @@ export const initCallSocket = (io: CallSocketServer): void => {
 
         await authenticatedSocket.join(`workspace_${workspaceId}`);
         await authenticatedSocket.join(workspaceId);
+        console.info(
+          `[Call Socket] User ${userId} joined workspace: ${workspaceId}`,
+        );
       } catch (error) {
         console.error("[Call Socket] Workspace join failed:", error);
-
         emitSocketError(
           authenticatedSocket,
           "WORKSPACE_JOIN_FAILED",
@@ -381,17 +410,20 @@ export const initCallSocket = (io: CallSocketServer): void => {
     });
 
     /**
-     * Agent answers the call.
-     * WebRTC SDP Answer is forwarded to Meta Graph API.
+     * Agent answers incoming call
      */
-    authenticatedSocket.on("answer-incoming-call", async (data) => {
+    authenticatedSocket.on("answer-incoming-call", async (data, ack) => {
       try {
         if (!data || !data.workspaceId || !data.callId) {
+          const error = new Error(
+            "A valid workspace ID and call ID are required.",
+          );
           emitSocketError(
             authenticatedSocket,
             "INVALID_CALL_DATA",
-            "A valid workspace ID and call ID are required.",
+            error.message,
           );
+          ack?.(error);
           return;
         }
 
@@ -400,15 +432,29 @@ export const initCallSocket = (io: CallSocketServer): void => {
           data.workspaceId,
         );
 
-        if (!allowed) return;
+        if (!allowed) {
+          ack?.(new Error("Workspace access denied."));
+          return;
+        }
+
+        if (!data.sdpAnswer?.trim()) {
+          const error = new Error(
+            "SDP answer is required to accept a WhatsApp call.",
+          );
+          emitSocketError(
+            authenticatedSocket,
+            "INVALID_SDP_ANSWER",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
 
         const now = new Date();
 
-        // MongoDB _id অথবা providerCallId (wacid...) উভয় দিয়েই কল ম্যাচ করানো
         const callQuery: Record<string, unknown> = {
           workspaceId: new mongoose.Types.ObjectId(data.workspaceId),
           status: "RINGING",
-          ringingUserIds: new mongoose.Types.ObjectId(userId),
           $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }],
         };
 
@@ -439,100 +485,252 @@ export const initCallSocket = (io: CallSocketServer): void => {
           .lean();
 
         if (!call) {
+          const error = new Error(
+            "This call is no longer available or was answered by someone else.",
+          );
           emitSocketError(
             authenticatedSocket,
             "CALL_NOT_AVAILABLE",
-            "This call is no longer available or you are not an eligible recipient.",
+            error.message,
           );
+          ack?.(error);
           return;
         }
 
         const assignedTo = call.assignedTo?.toString() ?? userId;
         const targetCallId = call.providerCallId || data.callId;
 
-        // ব্রাউজার থেকে SDP Answer আসলে মেটাতে কল অ্যাক্সেপ্ট করা
-        if (data.sdpAnswer) {
-          const account = await WhatsAppAccount.findOne({
-            workspaceId: call.workspaceId,
-            status: "CONNECTED",
-          })
-            .select("phoneNumberId accessToken")
-            .lean();
+        const account = await WhatsAppAccount.findOne({
+          workspaceId: call.workspaceId,
+          status: "CONNECTED",
+        })
+          .select("phoneNumberId +accessTokenEncrypted")
+          .lean();
 
-          const phoneId =
-            (call as any).phoneNumberId ||
-            account?.phoneNumberId ||
-            process.env.TEST_PHONE_NUMBER_ID ||
-            "1157794877408926";
-
-          // FIXED: accessToken টাইপ সেফ রিডিং
-          const token = (account as any)?.accessToken;
-
-          const metaSuccess = await acceptMetaCallWithSdp(
-            phoneId,
-            targetCallId,
-            data.sdpAnswer,
-            token,
-          );
-
-          if (metaSuccess) {
-            await CallLog.updateOne(
-              { _id: call._id },
-              { $set: { status: "CONNECTED" } },
+        const phoneId = (call as any).phoneNumberId || account?.phoneNumberId;
+        let token: string | undefined;
+        if (account?.accessTokenEncrypted) {
+          try {
+            token = decrypt(account.accessTokenEncrypted);
+          } catch (decryptErr) {
+            console.error(
+              "[Call Socket] Failed to decrypt account token for answer-incoming-call:",
+              decryptErr,
             );
           }
         }
 
-        // জয়ী এজেন্টকে কনফার্মেশন পাঠানো
+        if (!token) {
+          token =
+            process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+            process.env.META_SYSTEM_USER_TOKEN ||
+            process.env.WHATSAPP_ACCESS_TOKEN;
+        }
+
+        if (!phoneId || !token) {
+          await CallLog.updateOne(
+            { _id: call._id, status: "ASSIGNING" },
+            {
+              $set: { status: "RINGING" },
+              $unset: { assignedTo: 1, assignedAt: 1, answeredAt: 1 },
+            },
+          );
+          const error = new Error("WhatsApp account credentials not found.");
+          emitSocketError(
+            authenticatedSocket,
+            "ACCOUNT_NOT_CONFIGURED",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
+
+        const metaSuccess = await acceptMetaCallWithSdp(
+          phoneId,
+          targetCallId,
+          data.sdpAnswer,
+          token,
+        );
+
+        if (!metaSuccess) {
+          await CallLog.updateOne(
+            { _id: call._id, status: "ASSIGNING" },
+            {
+              $set: { status: "RINGING" },
+              $unset: { assignedTo: 1, assignedAt: 1, answeredAt: 1 },
+            },
+          );
+          const error = new Error("Meta rejected the call acceptance request.");
+          emitSocketError(
+            authenticatedSocket,
+            "META_CALL_ACCEPT_FAILED",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
+
+        await CallLog.updateOne(
+          { _id: call._id },
+          { $set: { status: "CONNECTED" } },
+        );
+
         authenticatedSocket.emit("call-accepted", {
           workspaceId: data.workspaceId,
           callId: targetCallId,
           assignedTo,
         });
+        ack?.(null, { accepted: true });
 
-        // অন্য সব এজেন্টদের জানানো যে কলটি রিসিভ হয়ে গেছে
-        for (const recipientId of call.ringingUserIds ?? []) {
-          const recipient = recipientId.toString();
-          if (recipient === assignedTo) continue;
-
-          io.to(getUserRoom(recipient)).emit("call-taken", {
-            workspaceId: data.workspaceId,
-            callId: targetCallId,
-            assignedTo,
-          });
-        }
+        // অন্য সব এজেন্টদের রিং বন্ধ করতে জানানো
+        io.to(data.workspaceId).emit("call-taken", {
+          workspaceId: data.workspaceId,
+          callId: targetCallId,
+          assignedTo,
+        });
       } catch (error) {
         console.error("[Call Socket] Answer event failed:", error);
-        emitSocketError(
-          authenticatedSocket,
-          "CALL_ANSWER_FAILED",
-          "Unable to answer this call.",
-        );
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to answer this call.";
+        emitSocketError(authenticatedSocket, "CALL_ANSWER_FAILED", message);
+        ack?.(error instanceof Error ? error : new Error(message));
       }
     });
 
-    authenticatedSocket.on("initiate-call", async (data) => {
+    /**
+     * Outgoing Call handler
+     */
+    authenticatedSocket.on("initiate-call", async (data, ack) => {
       try {
+        if (!data?.workspaceId || !data?.targetPhone || !data?.sdpOffer) {
+          const error = new Error(
+            "workspaceId, targetPhone, and sdpOffer are required.",
+          );
+          emitSocketError(
+            authenticatedSocket,
+            "INVALID_CALL_PARAMS",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
+
         const allowed = await authorizeWorkspace(
           authenticatedSocket,
-          data?.workspaceId,
+          data.workspaceId,
         );
 
-        if (!allowed) return;
+        if (!allowed) {
+          ack?.(new Error("Workspace access denied."));
+          return;
+        }
 
-        emitSocketError(
-          authenticatedSocket,
-          "META_CALLING_NOT_IMPLEMENTED",
-          "Outgoing WhatsApp calling is not configured yet.",
+        const account = await WhatsAppAccount.findOne({
+          workspaceId: new mongoose.Types.ObjectId(data.workspaceId),
+          status: "CONNECTED",
+        })
+          .select("phoneNumberId +accessTokenEncrypted")
+          .lean();
+
+        let token: string | undefined;
+        if (account?.accessTokenEncrypted) {
+          try {
+            token = decrypt(account.accessTokenEncrypted);
+          } catch (decryptErr) {
+            console.error(
+              "[Call Socket] Failed to decrypt account token for initiate-call:",
+              decryptErr,
+            );
+          }
+        }
+
+        if (!token) {
+          token =
+            process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+            process.env.META_SYSTEM_USER_TOKEN ||
+            process.env.WHATSAPP_ACCESS_TOKEN;
+        }
+        const phoneId = account?.phoneNumberId;
+
+        if (!phoneId || !token) {
+          const error = new Error("Connected WhatsApp credentials missing.");
+          emitSocketError(
+            authenticatedSocket,
+            "NO_CONNECTED_ACCOUNT",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
+
+        const response = await initiateMetaOutgoingCall(
+          phoneId,
+          data.targetPhone,
+          data.sdpOffer,
+          token,
         );
+
+        if (!response.success || !response.callId) {
+          const error = new Error("Meta rejected the outgoing call.");
+          emitSocketError(
+            authenticatedSocket,
+            "META_CALL_INITIATION_FAILED",
+            error.message,
+          );
+          ack?.(error);
+          return;
+        }
+
+        const callLogId = new mongoose.Types.ObjectId();
+        await CallLog.create({
+          _id: callLogId,
+          workspaceId: new mongoose.Types.ObjectId(data.workspaceId),
+          providerCallId: response.callId,
+          callSid: callLogId.toString(),
+          phoneNumber: data.targetPhone,
+          callerName: data.callerName || "Customer",
+          phoneNumberId: phoneId,
+          callType: "OUTGOING",
+          status: "RINGING",
+          assignedTo: new mongoose.Types.ObjectId(userId),
+          startedAt: new Date(),
+          durationSeconds: 0,
+        });
+
+        authenticatedSocket.emit("call-dialing", {
+          targetPhone: data.targetPhone,
+          callerName: data.callerName || "Customer",
+          callId: response.callId,
+        });
+
+        if (response.sdpAnswer) {
+          authenticatedSocket.emit("webrtc-answer", {
+            workspaceId: data.workspaceId,
+            callId: response.callId,
+            sdp: {
+              type: "answer",
+              sdp: response.sdpAnswer,
+            },
+          });
+        }
+
+        ack?.(null, { accepted: true, callId: response.callId });
       } catch (error) {
         console.error("[Call Socket] Initiate event failed:", error);
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not start outgoing call.";
+        emitSocketError(authenticatedSocket, "INITIATE_CALL_FAILED", message);
+        ack?.(error instanceof Error ? error : new Error(message));
       }
     });
 
-   
-
-    // callSocket.ts - io.on("connection") এর ভেতরে:
+    /**
+     * Hangup handler
+     */
     authenticatedSocket.on("hangup-call", async (data) => {
       try {
         if (!data?.workspaceId || !data?.callId) return;
@@ -555,35 +753,52 @@ export const initCallSocket = (io: CallSocketServer): void => {
 
         const call = await CallLog.findOne(query);
 
-        if (call && call.providerCallId) {
+        if (call) {
           const account = await WhatsAppAccount.findOne({
             workspaceId: call.workspaceId,
             status: "CONNECTED",
           })
-            .select("phoneNumberId accessToken")
+            .select("phoneNumberId +accessTokenEncrypted")
             .lean();
 
-          const phoneId =
-            call.phoneNumberId ||
-            account?.phoneNumberId ||
-            process.env.TEST_PHONE_NUMBER_ID ||
-            "1157794877408926";
+          const phoneId = call.phoneNumberId || account?.phoneNumberId;
+          let token: string | undefined;
+          if (account?.accessTokenEncrypted) {
+            try {
+              token = decrypt(account.accessTokenEncrypted);
+            } catch (decryptErr) {
+              console.error(
+                "[Call Socket] Failed to decrypt account token for hangup-call:",
+                decryptErr,
+              );
+            }
+          }
 
-          const token = (account as any)?.accessToken;
+          if (!token) {
+            token =
+              process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+              process.env.META_SYSTEM_USER_TOKEN ||
+              process.env.WHATSAPP_ACCESS_TOKEN;
+          }
 
-          // ১. মেটা ক্লাউডে কল টার্মিনেট করা (এতে হোয়াটসঅ্যাপের কল সাথে সাথে কেটে যাবে)
-          await terminateMetaCall(phoneId, call.providerCallId, token);
+          const metaCallId = call.providerCallId;
+          if (
+            metaCallId &&
+            !/^[a-f\d]{24}$/i.test(metaCallId) &&
+            phoneId &&
+            token
+          ) {
+            await terminateMetaCall(phoneId, metaCallId, token);
+          }
 
-          // ২. ডাটাবেজ আপডেট
           call.status = "ENDED";
           call.endedAt = new Date();
           await call.save();
 
-          // ৩. সব এজেন্টদের সকেটে জানানো যে কল শেষ
           const endData = {
-            notificationId: call.providerCallId,
+            notificationId: metaCallId || call._id.toString(),
             workspaceId: data.workspaceId,
-            callId: call.providerCallId,
+            callId: metaCallId || call._id.toString(),
             status: "ENDED" as const,
           };
 

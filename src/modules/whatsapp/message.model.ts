@@ -11,6 +11,7 @@ export type WhatsAppMessageType =
   | "LOCATION"
   | "TEMPLATE"
   | "INTERACTIVE"
+  | "CALL"
   | "UNKNOWN";
 
 export type WhatsAppMessageStatus =
@@ -42,6 +43,7 @@ export interface IWhatsAppMessage extends Document {
   timestamp: Date;
 
   errorMessage?: string;
+  callLogId?: mongoose.Types.ObjectId;
 
   createdAt: Date;
   updatedAt: Date;
@@ -97,6 +99,7 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
         "LOCATION",
         "TEMPLATE",
         "INTERACTIVE",
+        "CALL",
         "UNKNOWN",
       ],
       required: true,
@@ -106,6 +109,10 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
       type: String,
       enum: ["RECEIVED", "SENT", "DELIVERED", "READ", "FAILED"],
       required: true,
+    },
+    callLogId: {
+      type: Schema.Types.ObjectId,
+      ref: "CallLog",
     },
     statusUpdatedAt: {
       type: Date,

@@ -48,16 +48,32 @@ export type SubmitBankTransferInput = z.infer<typeof submitBankTransferSchema>;
 export const adminApproveTransferSchema = z
   .object({
     notes: z.string().trim().max(500).optional(),
+    adminNotes: z.string().trim().max(500).optional(),
+    stepUpToken: z.string().trim().optional(),
   })
   .strict();
 
 export const adminRejectTransferSchema = z
   .object({
+    reason: z.string().trim().min(3).max(500).optional(),
+    rejectionReason: z.string().trim().min(3).max(500).optional(),
+  })
+  .refine((data) => Boolean(data.reason || data.rejectionReason), {
+    message: "Rejection reason is required",
+    path: ["rejectionReason"],
+  });
+
+export const adminRefundPaymentSchema = z
+  .object({
     reason: z
       .string()
       .trim()
-      .min(3, "Rejection reason is required")
-      .max(500, "Rejection reason cannot exceed 500 characters"),
+      .min(3, "Refund reason is required (at least 3 characters)")
+      .max(500, "Refund reason cannot exceed 500 characters"),
+    refundAmount: z
+      .number()
+      .positive("Refund amount must be positive")
+      .optional(),
   })
   .strict();
 

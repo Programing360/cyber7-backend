@@ -1,4 +1,4 @@
-import type { Types } from "mongoose";
+import mongoose, { type Types } from "mongoose";
 import axios from "axios";
 import WhatsAppAccount from "../modules/whatsapp/whatsapp.model.js";
 import Workspace from "../modules/workspace/workspace.model.js";
@@ -11,6 +11,7 @@ import {
   enqueueIncomingCallNotifications,
 } from "../modules/Calling/callNotificationOutbox.service.js";
 import { getCallSocketIO } from "../sockets/callSocket.js";
+import { decrypt } from "../utils/encryption.js";
 
 type CallDirection = "USER_INITIATED" | "BUSINESS_INITIATED";
 type CallType = "INCOMING" | "OUTGOING" | "MISSED";
@@ -215,14 +216,125 @@ export async function acceptMetaCallWithSdp(
   }
 }
 
+export async function terminateMetaCall(
+  phoneNumberId: string,
+  callId: string,
+  accessToken?: string,
+): Promise<boolean> {
+  const token =
+    accessToken ||
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!token) {
+    console.error(
+      "[Calling Webhook] Cannot terminate call: No access token found.",
+    );
+    return false;
+  }
+
+  if (/^[a-f\d]{24}$/i.test(callId)) {
+    console.warn(
+      "[Calling Webhook] Skipping terminate for MongoDB ID:",
+      callId,
+    );
+    return false;
+  }
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
+      {
+        messaging_product: "whatsapp",
+        call_id: callId,
+        action: "terminate",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    logEvent("Meta call terminated successfully via Graph API", { callId });
+    return response.status === 200;
+  } catch (error: any) {
+    console.warn(
+      "[Calling Webhook] Meta terminate call failed/already ended:",
+      error.response?.data?.error?.message || error.message,
+    );
+    return false;
+  }
+}
+
+export async function initiateMetaOutgoingCall(
+  phoneNumberId: string,
+  toPhoneNumber: string,
+  sdpOffer: string,
+  accessToken?: string,
+): Promise<{ success: boolean; callId?: string; sdpAnswer?: string }> {
+  const token =
+    accessToken ||
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+    process.env.META_SYSTEM_USER_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!token) {
+    console.error(
+      "[Calling Webhook] Cannot initiate call: No access token found.",
+    );
+    return { success: false };
+  }
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
+      {
+        messaging_product: "whatsapp",
+        to: toPhoneNumber,
+        action: "connect",
+        session: {
+          sdp_type: "offer",
+          sdp: sdpOffer,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    const callId = response.data?.calls?.[0]?.id || response.data?.id;
+    const sdpAnswer =
+      response.data?.calls?.[0]?.session?.sdp || response.data?.session?.sdp;
+
+    return {
+      success: true,
+      callId,
+      sdpAnswer,
+    };
+  } catch (error: any) {
+    console.error(
+      "[Calling Webhook] Failed to initiate call with Meta:",
+      error.response?.data || error.message,
+    );
+    return { success: false };
+  }
+}
+
 async function resolveWhatsAppAccount(
   phoneNumberId: string,
 ): Promise<ResolvedAccount | null> {
+  const cleanPhoneId = phoneNumberId.trim();
   const account = await WhatsAppAccount.findOne({
-    phoneNumberId,
+    phoneNumberId: cleanPhoneId,
     status: "CONNECTED",
   })
-    .select("_id workspaceId accessToken phoneNumberId")
+    .select("_id workspaceId phoneNumberId +accessTokenEncrypted")
     .lean();
 
   if (!account?.workspaceId) return null;
@@ -236,10 +348,29 @@ async function resolveWhatsAppAccount(
 
   if (!workspace) return null;
 
+  let token: string | undefined;
+  if (account.accessTokenEncrypted) {
+    try {
+      token = decrypt(account.accessTokenEncrypted);
+    } catch (decryptErr) {
+      console.error(
+        "[Calling Webhook] Failed to decrypt account access token:",
+        decryptErr,
+      );
+    }
+  }
+
+  if (!token) {
+    token =
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
+      process.env.META_SYSTEM_USER_TOKEN ||
+      process.env.WHATSAPP_ACCESS_TOKEN;
+  }
+
   return {
     workspaceId: workspace._id,
-    accessToken: (account as any).accessToken,
-    phoneNumberId,
+    accessToken: token,
+    phoneNumberId: cleanPhoneId,
   };
 }
 
@@ -319,9 +450,13 @@ async function ensureCallLog(
   identity: CallIdentity,
   incomingRecipients?: IncomingRecipients,
 ): Promise<{ created: boolean; callLogId: Types.ObjectId }> {
+  const callLogId = new mongoose.Types.ObjectId();
+
   const insertFields: Record<string, unknown> = {
+    _id: callLogId,
     workspaceId,
     providerCallId: identity.callId,
+    callSid: callLogId.toString(),
     callerName: identity.callerName,
     phoneNumber: identity.phoneNumber,
     phoneNumberId: identity.phoneNumberId,
@@ -341,56 +476,27 @@ async function ensureCallLog(
   }
 
   try {
-    const result = await CallLog.updateOne(
-      {
-        workspaceId,
-        providerCallId: identity.callId,
-      },
-      {
-        $setOnInsert: insertFields,
-      },
-      {
-        upsert: true,
-        runValidators: true,
-        setDefaultsOnInsert: true,
-      },
-    );
-
-    const existingCall = await CallLog.findOne({
+    const existing = await CallLog.findOne({
       workspaceId,
       providerCallId: identity.callId,
-    })
-      .select("_id")
-      .lean();
+    }).select("_id");
 
-    if (!existingCall) {
-      throw new Error("CallLog could not be retrieved after upsert.");
+    if (existing) {
+      return { created: false, callLogId: existing._id };
     }
 
-    return {
-      created: result.upsertedCount === 1,
-      callLogId: existingCall._id,
-    };
+    const created = await CallLog.create(insertFields);
+    return { created: true, callLogId: created._id };
   } catch (error) {
-    if (!isDuplicateKeyError(error)) {
-      throw error;
-    }
-
-    const existingCall = await CallLog.findOne({
+    const fallback = await CallLog.findOne({
       workspaceId,
       providerCallId: identity.callId,
-    })
-      .select("_id")
-      .lean();
+    }).select("_id");
 
-    if (!existingCall) {
-      throw error;
+    if (fallback) {
+      return { created: false, callLogId: fallback._id };
     }
-
-    return {
-      created: false,
-      callLogId: existingCall._id,
-    };
+    throw error;
   }
 }
 
@@ -410,9 +516,129 @@ async function updateNonTerminalCall(
   );
 }
 
-/**
- * Processes incoming and outgoing connect events.
- */
+// async function processConnectEvent(
+//   workspaceId: Types.ObjectId,
+//   event: WhatsAppCallEvent,
+//   contacts: WhatsAppCallContact[] | undefined,
+//   phoneNumberId: string,
+// ): Promise<void> {
+//   const callId = normalizeString(event.id);
+//   const direction = normalizeDirection(event.direction);
+//   const from = normalizeString(event.from);
+//   const to = normalizeString(event.to);
+
+//   if (!callId || !direction || !from || !to) {
+//     logInvalidEvent("Connect event has missing identity fields");
+//     return;
+//   }
+
+//   const phoneNumber = getRemotePhoneNumber(direction, from, to);
+
+//   if (!phoneNumber) {
+//     logInvalidEvent("Connect event has no remote phone number");
+//     return;
+//   }
+
+//   const callerName = getContactName(contacts, phoneNumber);
+
+//   const identity: CallIdentity = {
+//     callId,
+//     phoneNumber,
+//     callerName,
+//     callType: getCallType(direction),
+//     startedAt: parseMetaDate(event.timestamp) ?? new Date(),
+//     phoneNumberId,
+//   };
+
+//   const wsId = workspaceId.toString();
+//   const io = getCallSocketIO();
+
+//   // ১. ইনকামিং কল (কাস্টমার কল করেছে)
+//   if (direction === "USER_INITIATED") {
+//     const recipients = await resolveIncomingRecipients(
+//       workspaceId,
+//       phoneNumber,
+//     );
+
+//     const result = await ensureCallLog(workspaceId, identity, recipients);
+
+//     const incomingPayload = {
+//       notificationId: callId,
+//       callId, // Meta providerCallId (wacid-...)
+//       callSid: result.callLogId.toString(), // Database MongoDB _id
+//       name: callerName,
+//       phone: phoneNumber,
+//       workspaceId: wsId,
+//       sdpOffer: event.session?.sdp,
+//       phoneNumberId,
+//     };
+
+//     console.info(
+//       `[Calling Webhook DIRECT] 🚀 Broadcasting incoming-call for ${phoneNumber}`,
+//     );
+
+//     // 🔥 সরাসরি কোনোরকম বাধা ছাড়াই কানেক্টেড ব্রাউজারে পাঠানো
+//     if (io) {
+//       io.emit("incoming-call", incomingPayload);
+//       io.to(wsId).emit("incoming-call", incomingPayload);
+//       io.to(`workspace_${wsId}`).emit("incoming-call", incomingPayload);
+//       for (const uid of recipients.userIds) {
+//         io.to(`user_${uid.toString()}`).emit("incoming-call", incomingPayload);
+//       }
+//     } else {
+//       console.error("❌ [Calling Webhook] Critical: io instance is NULL!");
+//     }
+
+//     try {
+//       await enqueueIncomingCallNotifications({
+//         workspaceId,
+//         callLogId: result.callLogId,
+//         providerCallId: callId,
+//         recipientUserIds: recipients.userIds,
+//         payload: incomingPayload,
+//       });
+//     } catch (enqueueErr) {
+//       console.warn("[Calling Webhook] Enqueue notice error:", enqueueErr);
+//     }
+
+//     return;
+//   }
+
+//   // ২. আউটগোয়িং কল (ডায়ালিং চলছে)
+//   await ensureCallLog(workspaceId, identity);
+
+//   await updateNonTerminalCall(workspaceId, callId, {
+//     callerName,
+//     phoneNumber,
+//     status: "RINGING",
+//   });
+
+//   logEvent("Outgoing connect event processed", { callId });
+
+//   // 🔥 আউটগোয়িং কলের WebRTC Answer আসলে ব্রাউজারকে অডিও চালু করার নির্দেশ
+//   if (event.session?.sdp && io) {
+//     const answerPayload = {
+//       workspaceId: wsId,
+//       callId,
+//       sdp: {
+//         type: "answer" as const,
+//         sdp: event.session.sdp,
+//       },
+//     };
+
+//     io.emit("webrtc-answer", answerPayload);
+//     io.to(wsId).emit("webrtc-answer", answerPayload);
+//     io.to(`workspace_${wsId}`).emit("webrtc-answer", answerPayload);
+
+//     io.emit("call-accepted", { workspaceId: wsId, callId, assignedTo: "" });
+//     io.to(wsId).emit("call-accepted", {
+//       workspaceId: wsId,
+//       callId,
+//       assignedTo: "",
+//     });
+//   }
+// }
+
 async function processConnectEvent(
   workspaceId: Types.ObjectId,
   event: WhatsAppCallEvent,
@@ -424,7 +650,16 @@ async function processConnectEvent(
   const from = normalizeString(event.from);
   const to = normalizeString(event.to);
 
+  // console.log("🔎 [processConnectEvent] Parsed Fields:", {
+  //   callId,
+  //   direction,
+  //   from,
+  //   to,
+  //   hasSdpOffer: Boolean(event.session?.sdp),
+  // });
+
   if (!callId || !direction || !from || !to) {
+    console.warn("⚠️ [processConnectEvent] DROPPED: Missing identity fields!");
     logInvalidEvent("Connect event has missing identity fields");
     return;
   }
@@ -432,6 +667,7 @@ async function processConnectEvent(
   const phoneNumber = getRemotePhoneNumber(direction, from, to);
 
   if (!phoneNumber) {
+    console.warn("⚠️ [processConnectEvent] DROPPED: No remote phone number!");
     logInvalidEvent("Connect event has no remote phone number");
     return;
   }
@@ -447,7 +683,7 @@ async function processConnectEvent(
     phoneNumberId,
   };
 
-  // ১. ইনকামিং কল (কাস্টমার কল করেছে)
+  const wsId = workspaceId.toString();
   if (direction === "USER_INITIATED") {
     const recipients = await resolveIncomingRecipients(
       workspaceId,
@@ -456,50 +692,46 @@ async function processConnectEvent(
 
     const result = await ensureCallLog(workspaceId, identity, recipients);
 
-    const persistedCall = await CallLog.findOne({
-      _id: result.callLogId,
-      workspaceId,
-    })
-      .select("ringingUserIds")
-      .lean();
-
-    if (!persistedCall) {
-      throw new Error("Incoming CallLog not found after creation.");
-    }
-
-    const recipientIds = persistedCall.ringingUserIds ?? [];
-
-    if (recipientIds.length === 0) {
-      logEvent("Incoming call has no eligible recipients", { callId });
+    // Duplicate Meta webhook হলে দ্বিতীয়বার notification পাঠাব না।
+    if (!result.created) {
+      logEvent("Duplicate incoming connect event ignored", { callId });
       return;
     }
+
+    const incomingPayload = {
+      notificationId: callId,
+      callId,
+      callSid: result.callLogId.toString(),
+      name: callerName,
+      phone: phoneNumber,
+      workspaceId: wsId,
+      sdpOffer: event.session?.sdp,
+      phoneNumberId,
+    };
 
     await enqueueIncomingCallNotifications({
       workspaceId,
       callLogId: result.callLogId,
       providerCallId: callId,
-      recipientUserIds: recipientIds,
-      payload: {
-        workspaceId: workspaceId.toString(),
-        callId,
-        name: callerName,
-        phone: phoneNumber,
-        sdpOffer: event.session?.sdp,
-        phoneNumberId,
-      },
+      recipientUserIds: recipients.userIds,
+      payload: incomingPayload,
     });
 
-    logEvent("Incoming call notification enqueued", {
+    logEvent("Incoming call notification queued", {
       callId,
-      recipientCount: recipientIds.length,
-      callLogCreated: result.created,
+      recipients: recipients.userIds.length,
+      hasSdpOffer: Boolean(event.session?.sdp),
     });
 
     return;
   }
 
-  // ২. আউটগোয়িং কল (ডায়ালিং চলছে, মেটার সাথে মিডিয়া সেশন কানেক্ট হয়েছে)
-  await ensureCallLog(workspaceId, identity);
+  // ২. আউটগোয়িং কল (ডায়ালিং চলছে)
+  // console.log(
+  //   "📱 [processConnectEvent] >>> BUSINESS_INITIATED (OUTGOING CALL) <<<",
+  // );
+
+  const result = await ensureCallLog(workspaceId, identity);
 
   await updateNonTerminalCall(workspaceId, callId, {
     callerName,
@@ -507,33 +739,43 @@ async function processConnectEvent(
     status: "RINGING",
   });
 
-  logEvent("Outgoing connect event processed (Dialing in progress)", {
-    callId,
-  });
+  logEvent("Outgoing connect event processed", { callId });
 
-  // শুধুমাত্র WebRTC Answer SDP থাকলে ব্রাউজারে পাঠানো (কল অ্যাকসেপ্টেড নয়!)
   if (event.session?.sdp) {
-    const io = getCallSocketIO();
-    if (io) {
-      const wsId = workspaceId.toString();
-      const answerPayload = {
-        workspaceId: wsId,
-        callId,
-        sdp: {
-          type: "answer" as const,
-          sdp: event.session.sdp,
-        },
-      };
+    const call = await CallLog.findOne({
+      _id: result.callLogId,
+      workspaceId,
+    })
+      .select("assignedTo")
+      .lean();
 
-      // Room chaining দিয়ে ডুপ্লিকেট ছাড়া একবারেই পাঠানো
-      io.to(wsId).to(`workspace_${wsId}`).emit("webrtc-answer", answerPayload);
+    const assignedTo = call?.assignedTo?.toString();
+
+    if (assignedTo) {
+      const io = getCallSocketIO();
+
+      if (io) {
+        io.to(`user_${assignedTo}`).emit("webrtc-answer", {
+          workspaceId: wsId,
+          callId,
+          sdp: {
+            type: "answer",
+            sdp: event.session.sdp,
+          },
+        });
+
+        io.to(`user_${assignedTo}`).emit("call-accepted", {
+          workspaceId: wsId,
+          callId,
+          assignedTo,
+        });
+      }
     }
   }
+
+  logEvent("Outgoing connect event processed", { callId });
 }
 
-/**
- * Processes incoming and outgoing terminate events.
- */
 async function processTerminateEvent(
   workspaceId: Types.ObjectId,
   event: WhatsAppCallEvent,
@@ -647,50 +889,32 @@ async function processTerminateEvent(
 
   const wsId = workspaceId.toString();
 
-  // ১. ইনকামিং কল টার্মিনেশন নোটিফিকেশন
   if (direction === "USER_INITIATED") {
     const recipientUserIds = existingCall?.ringingUserIds ?? [];
 
-    if (recipientUserIds.length > 0) {
-      await enqueueCallEndedNotifications({
-        workspaceId,
-        callLogId,
-        providerCallId: callId,
-        recipientUserIds,
-        payload: {
-          workspaceId: wsId,
-          callId,
-          endStatus,
-        },
-      });
-
-      logEvent("Call-ended notifications enqueued", {
+    await enqueueCallEndedNotifications({
+      workspaceId,
+      callLogId,
+      providerCallId: callId,
+      recipientUserIds,
+      payload: {
+        workspaceId: wsId,
         callId,
-        recipientCount: recipientUserIds.length,
         endStatus,
-      });
-    }
-  }
+      },
+    });
+  } else if (existingCall?.assignedTo) {
+    const io = getCallSocketIO();
 
-  // ২. আউটগোয়িং কল টার্মিনেশন নোটিফিকেশন (সকেটে সরাসরি পুশ)
-  const io = getCallSocketIO();
-  if (io) {
-    const endData = {
-      notificationId: callId,
-      workspaceId: wsId,
-      callId,
-      status: endStatus,
-    };
-
-    io.to(wsId).emit("incoming-call-ended", endData);
-    io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
-
-    if (existingCall?.assignedTo) {
-      io.to(`user_${existingCall.assignedTo.toString()}`).emit(
-        "incoming-call-ended",
-        endData,
-      );
-    }
+    io?.to(`user_${existingCall.assignedTo.toString()}`).emit(
+      "incoming-call-ended",
+      {
+        notificationId: callId,
+        workspaceId: wsId,
+        callId,
+        status: endStatus,
+      },
+    );
   }
 
   logEvent("Terminate event processed", {
@@ -701,9 +925,6 @@ async function processTerminateEvent(
   });
 }
 
-/**
- * Processes status updates (RINGING, ACCEPTED, REJECTED).
- */
 async function processCallStatus(
   workspaceId: Types.ObjectId,
   statusEvent: WhatsAppCallStatus,
@@ -722,7 +943,7 @@ async function processCallStatus(
   const timestamp = parseMetaDate(statusEvent.timestamp) ?? new Date();
   const wsId = workspaceId.toString();
   const io = getCallSocketIO();
-
+  console.log(status, "callId", callId);
   if (status === "RINGING") {
     const recipient = normalizeString(statusEvent.recipient_id);
 
@@ -751,21 +972,26 @@ async function processCallStatus(
     await updateNonTerminalCall(workspaceId, callId, {
       status: "CONNECTED",
     });
-    
-    logEvent("Customer picked up the call on WhatsApp (status: ACCEPTED)", { callId });
 
-    if (io) {
-      io.to(wsId).emit("call-accepted", {
+    const call = await CallLog.findOne({
+      workspaceId,
+      providerCallId: callId,
+    })
+      .select("assignedTo")
+      .lean();
+
+    if (call?.assignedTo) {
+      const io = getCallSocketIO();
+
+      io?.to(`user_${call.assignedTo.toString()}`).emit("call-accepted", {
         workspaceId: wsId,
         callId,
-        assignedTo: "",
-      });
-      io.to(`workspace_${wsId}`).emit("call-accepted", {
-        workspaceId: wsId,
-        callId,
-        assignedTo: "",
+        assignedTo: call.assignedTo.toString(),
       });
     }
+
+    logEvent("Outgoing call accepted", { callId });
+
     return;
   }
 
@@ -775,68 +1001,108 @@ async function processCallStatus(
       endedAt: timestamp,
     });
 
-    if (io) {
-      const endData = {
+    const call = await CallLog.findOne({
+      workspaceId,
+      providerCallId: callId,
+    })
+      .select("assignedTo")
+      .lean();
+
+    if (call?.assignedTo) {
+      const io = getCallSocketIO();
+
+      io?.to(`user_${call.assignedTo.toString()}`).emit("incoming-call-ended", {
         notificationId: callId,
         workspaceId: wsId,
         callId,
-        status: "REJECTED" as const,
-      };
-
-      io.to(wsId).emit("incoming-call-ended", endData);
-      io.to(`workspace_${wsId}`).emit("incoming-call-ended", endData);
+        status: "REJECTED",
+      });
     }
+
     return;
   }
 
   logEvent("Unsupported call status ignored", { status });
 }
-/**
- * মেটাতে সরাসরি কল কাটার (Terminate) রিকোয়েস্ট পাঠানো
- */
-export async function terminateMetaCall(
-  phoneNumberId: string,
-  callId: string,
-  accessToken?: string,
-): Promise<boolean> {
-  const token =
-    accessToken ||
-    process.env.META_SYSTEM_USER_ACCESS_TOKEN ||
-    process.env.META_SYSTEM_USER_TOKEN ||
-    process.env.WHATSAPP_ACCESS_TOKEN;
 
-  if (!token) return false;
+// export async function processWhatsAppCallingWebhook(
+//   value: WhatsAppCallingWebhookValue,
+// ): Promise<void> {
+//   // console.log("hello");
+//   const phoneNumberId = normalizeString(value.metadata?.phone_number_id);
+//   // console.log(phoneNumberId);
+//   if (!phoneNumberId) {
+//     logInvalidEvent("Missing metadata.phone_number_id");
+//     return;
+//   }
 
-  try {
-    const response = await axios.post(
-      `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
-      {
-        messaging_product: "whatsapp",
-        call_id: callId,
-        action: "terminate",
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
+//   const account = await resolveWhatsAppAccount(phoneNumberId);
 
-    return response.status === 200;
-  } catch (error: any) {
-    console.warn(
-      "[Calling] Meta terminate call failed/already ended:",
-      error.response?.data?.error?.message || error.message,
-    );
-    return false;
-  }
-}
+//   if (!account) {
+//     logEvent(
+//       "No connected account or active workspace found for phone number ID",
+//       {
+//         phoneNumberId,
+//       },
+//     );
+//     return;
+//   }
+
+//   const contacts = value.contacts ?? [];
+
+//   for (const event of value.calls ?? []) {
+//     const eventName = normalizeString(event.event)?.toLowerCase();
+
+//     console.log(eventName);
+
+//     if (eventName === "connect") {
+//       await processConnectEvent(
+//         account.workspaceId,
+//         event,
+//         contacts,
+//         phoneNumberId,
+//       );
+//       continue;
+//     }
+
+//     if (eventName === "terminate") {
+//       await processTerminateEvent(
+//         account.workspaceId,
+//         event,
+//         contacts,
+//         phoneNumberId,
+//       );
+//       continue;
+//     }
+
+//     if (eventName) {
+//       logEvent("Unsupported call event ignored", { event: eventName });
+//     } else {
+//       logInvalidEvent("Call event has no event name");
+//     }
+//   }
+
+//   for (const statusEvent of value.statuses ?? []) {
+//     await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
+//   }
+// }
 
 export async function processWhatsAppCallingWebhook(
   value: WhatsAppCallingWebhookValue,
 ): Promise<void> {
   const phoneNumberId = normalizeString(value.metadata?.phone_number_id);
+
+  console.log("\n========================================================");
+  console.log("📥 [Calling Webhook] Webhook Received!");
+  console.log("📱 [Calling Webhook] Phone Number ID:", phoneNumberId);
+  console.log(
+    "📦 [Calling Webhook] Calls Array Length:",
+    value.calls?.length || 0,
+  );
+  console.log(
+    "📊 [Calling Webhook] Statuses Array Length:",
+    value.statuses?.length || 0,
+  );
 
   if (!phoneNumberId) {
     logInvalidEvent("Missing metadata.phone_number_id");
@@ -846,16 +1112,28 @@ export async function processWhatsAppCallingWebhook(
   const account = await resolveWhatsAppAccount(phoneNumberId);
 
   if (!account) {
-    logEvent("No connected account or active workspace found");
+    console.error(
+      "❌ [Calling Webhook] No connected account found for phone number ID:",
+      phoneNumberId,
+    );
     return;
   }
+
+  console.log(
+    "🏢 [Calling Webhook] Resolved Workspace ID:",
+    account.workspaceId.toString(),
+  );
 
   const contacts = value.contacts ?? [];
 
   for (const event of value.calls ?? []) {
     const eventName = normalizeString(event.event)?.toLowerCase();
+    console.log(
+      `🔍 [Calling Webhook] Processing event: "${eventName}" | Call ID: ${event.id} | Direction: ${event.direction}`,
+    );
 
     if (eventName === "connect") {
+      console.log("🚀 [Calling Webhook] ROUTING TO => processConnectEvent()");
       await processConnectEvent(
         account.workspaceId,
         event,
@@ -866,6 +1144,7 @@ export async function processWhatsAppCallingWebhook(
     }
 
     if (eventName === "terminate") {
+      console.log("🛑 [Calling Webhook] ROUTING TO => processTerminateEvent()");
       await processTerminateEvent(
         account.workspaceId,
         event,
@@ -885,4 +1164,5 @@ export async function processWhatsAppCallingWebhook(
   for (const statusEvent of value.statuses ?? []) {
     await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
   }
+  console.log("========================================================\n");
 }

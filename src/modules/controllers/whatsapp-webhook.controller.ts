@@ -271,7 +271,7 @@ export async function receiveWhatsAppWebhook(
 ) {
   try {
     // 1. Verify Meta webhook signature.
-  
+
     const signature = req.headers["x-hub-signature-256"];
     const rawBody = req.rawBody ?? Buffer.alloc(0);
 
@@ -299,6 +299,10 @@ export async function receiveWhatsAppWebhook(
       });
     }
 
+    console.log("👉 Incoming Webhook URL:", req.originalUrl);
+    console.log("👉 Headers:", req.headers["x-hub-signature-256"]);
+    console.log("👉 Body Object:", req.body?.object);
+
     // 2. Validate webhook payload.
     const payload = req.body as WhatsAppWebhookPayload;
 
@@ -312,41 +316,53 @@ export async function receiveWhatsAppWebhook(
         const value = change.value;
 
         // 4. Process WhatsApp Calling webhook events.
-        if (change.field === "calls") {
+        const hasCallEvents =
+          change.field === "calls" ||
+          Boolean(
+            (value as any)?.calls &&
+            Array.isArray((value as any).calls) &&
+            (value as any).calls.length > 0,
+          ) ||
+          Boolean(
+            (value as any)?.statuses &&
+            Array.isArray((value as any).statuses) &&
+            (value as any).statuses.some((s: any) => s.type === "call"),
+          );
+
+        if (hasCallEvents) {
           const phoneNumberId = value.metadata?.phone_number_id;
 
           if (!phoneNumberId) {
             console.warn("[Calling Webhook] Missing metadata.phone_number_id");
+          } else {
+            try {
+              await processWhatsAppCallingWebhook({
+                metadata: {
+                  phone_number_id: phoneNumberId,
+                },
+                contacts: value.contacts,
+                calls: value.calls,
+                // forward call-progress statuses so processCallStatus()
+                // can handle RINGING / ACCEPTED / REJECTED for business-initiated calls.
+                statuses: value.statuses,
+              });
+
+              console.info(
+                `[Calling Webhook] Processed call events for phoneNumberId: ${phoneNumberId}`,
+              );
+            } catch (callingError) {
+              console.error(
+                "[Calling Webhook] Failed to process call events:",
+                callingError instanceof Error
+                  ? callingError.message
+                  : callingError,
+              );
+            }
+          }
+
+          if (change.field === "calls") {
             continue;
           }
-
-          try {
-            await processWhatsAppCallingWebhook({
-              metadata: {
-                phone_number_id: phoneNumberId,
-              },
-              contacts: value.contacts,
-              calls: value.calls,
-              // BUG-02 FIX: forward call-progress statuses so processCallStatus()
-              // can handle RINGING / ACCEPTED / REJECTED for business-initiated calls.
-              statuses: value.statuses,
-            });
-
-            console.info(
-              `[Calling Webhook] Processed call events for phoneNumberId: ${phoneNumberId}`,
-            );
-          } catch (callingError) {
-            console.error(
-              "[Calling Webhook] Failed to process call events:",
-              callingError instanceof Error
-                ? callingError.message
-                : callingError,
-            );
-
-            throw callingError;
-          }
-
-          continue;
         }
 
         // Ignore unsupported webhook fields.
@@ -387,6 +403,8 @@ export async function receiveWhatsAppWebhook(
               },
             });
 
+            console.log('result',result);
+
             if (result.accountNotFound) {
               console.warn(
                 `[Webhook] No connected account for phoneNumberId: ${phoneNumberId}, skipping message ${message.id}`,
@@ -410,8 +428,10 @@ export async function receiveWhatsAppWebhook(
           }
         }
 
-        // 6. Process outgoing message status updates.
-        for (const status of value.statuses ?? []) {
+        // 6. Process outgoing message status updates (excluding call statuses).
+        for (const status of (value.statuses ?? []).filter(
+          (s: any) => s.type !== "call",
+        )) {
           try {
             const cleanPhoneId = phoneNumberId.trim();
 

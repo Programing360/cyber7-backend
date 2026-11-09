@@ -288,6 +288,45 @@ export class AdminSessionService {
       };
     }
 
+    // 4. Global Invalidation Check: tokenInvalidBefore
+    if (
+      user.tokenInvalidBefore &&
+      session.createdAt.getTime() < new Date(user.tokenInvalidBefore).getTime()
+    ) {
+      await AdminSession.updateOne(
+        { _id: session._id, status: "ACTIVE" },
+        {
+          $set: {
+            status: "REVOKED",
+            revokedAt: now,
+            revocationReason: "SESSIONS_REVOKED_GLOBAL",
+          },
+        },
+      );
+      session.status = "REVOKED";
+      session.revokedAt = now;
+      session.revocationReason = "SESSIONS_REVOKED_GLOBAL";
+
+      adminSecurityAuditService
+        .recordSecurityEvent({
+          eventType: "SESSION_REVOKED",
+          adminUserId: user._id,
+          adminEmail: user.email,
+          sessionId: session._id,
+          reason:
+            "SESSIONS_REVOKED_GLOBAL: session created before tokenInvalidBefore timestamp",
+        })
+        .catch(Boolean);
+
+      return {
+        success: false,
+        code: "SESSION_REVOKED",
+        message:
+          "Administrator session has been invalidated by a security event or password reset",
+        session,
+      };
+    }
+
     const platformRole = (user as unknown as { platformRole?: string }).platformRole;
     if (platformRole !== "SUPER_ADMIN" && platformRole !== "FINANCE_ADMIN") {
       await AdminSession.updateOne(
@@ -546,6 +585,41 @@ export class AdminSessionService {
     }
 
     return result.modifiedCount;
+  }
+
+  public async purgeSessions(actor?: {
+    adminUserId?: string | Types.ObjectId;
+    adminEmail?: string;
+    sessionId?: string | Types.ObjectId;
+    ipAddress?: string;
+    userAgent?: string;
+  }): Promise<number> {
+    const now = new Date();
+    const result = await AdminSession.deleteMany({
+      $or: [
+        { idleExpiresAt: { $lt: now } },
+        { absoluteExpiresAt: { $lt: now } },
+        { status: "REVOKED" },
+        { status: "EXPIRED" },
+      ],
+    });
+
+    if (actor) {
+      await adminSecurityAuditService.recordSecurityEvent({
+        eventType: "ADMIN_SESSIONS_PURGED",
+        adminUserId: actor.adminUserId,
+        adminEmail: actor.adminEmail,
+        sessionId: actor.sessionId,
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
+        reason: `Purged ${result.deletedCount} expired and revoked admin sessions`,
+        metadata: {
+          purgedCount: result.deletedCount,
+        },
+      });
+    }
+
+    return result.deletedCount;
   }
 }
 

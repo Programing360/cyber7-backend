@@ -21,6 +21,12 @@ const workspaceSchema = new Schema(
         "Slug must contain only lowercase letters, numbers, and hyphens",
       ],
     },
+    // Normalized name for global uniqueness
+    nameNormalized: {
+      type: String,
+      required: true,
+      select: false,
+    },
 
     ownerId: {
       type: Schema.Types.ObjectId,
@@ -33,6 +39,30 @@ const workspaceSchema = new Schema(
       type: String,
       enum: ["ACTIVE", "SUSPENDED"],
       default: "ACTIVE",
+    },
+
+    suspensionReason: {
+      type: String,
+      default: null,
+    },
+
+    suspendedAt: {
+      type: Date,
+      default: null,
+    },
+
+    customLimits: {
+      type: new Schema(
+        {
+          maxWhatsAppNumbers: { type: Number, default: null },
+          maxTeamMembers: { type: Number, default: null },
+        },
+        { _id: false },
+      ),
+      default: () => ({
+        maxWhatsAppNumbers: null,
+        maxTeamMembers: null,
+      }),
     },
 
     timezone: {
@@ -51,6 +81,13 @@ const workspaceSchema = new Schema(
     versionKey: false,
   },
 );
+
+// Globally unique workspace names
+workspaceSchema.index(
+  { nameNormalized: 1 },
+  { unique: true, name: "unique_workspace_name" },
+);
+
 
 export type WorkspaceDocument = InferSchemaType<typeof workspaceSchema>;
 

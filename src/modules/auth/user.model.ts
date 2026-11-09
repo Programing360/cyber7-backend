@@ -93,6 +93,16 @@ const userSchema = new Schema(
       default: true,
     },
 
+    suspendedReason: {
+      type: String,
+      default: null,
+    },
+
+    tokenInvalidBefore: {
+      type: Date,
+      default: null,
+    },
+
     displayName: {
       type: String,
       trim: true,

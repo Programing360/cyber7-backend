@@ -1,6 +1,7 @@
 import type { Response, NextFunction } from "express";
 import mongoose from "mongoose";
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+import type { AdminAuthenticatedRequest } from "../../middlewares/authenticate-admin-session.js";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 import { AppError } from "../../utils/app-error.js";
 import { getRouteParam } from "../../utils/get-route-param.js";
@@ -8,12 +9,14 @@ import { BILLING_PLANS } from "./billing.config.js";
 import { billingService } from "./billing.service.js";
 import {
   adminApproveTransferSchema,
+  adminRefundPaymentSchema,
   adminRejectTransferSchema,
   initiatePaymentSchema,
   listInvoicesQuerySchema,
   submitBankTransferSchema,
 } from "./billing.validation.js";
 import { invoiceService } from "./invoice.service.js";
+import { subscriptionLifecycleService } from "./subscription-lifecycle.service.js";
 
 /**
  * GET /api/workspaces/:workspaceId/billing/overview
@@ -46,10 +49,11 @@ export const listPlansController = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
+    const plans = await subscriptionLifecycleService.listPlansCatalog();
     res.status(200).json({
       success: true,
       data: {
-        plans: Object.values(BILLING_PLANS),
+        plans,
       },
     });
   } catch (error) {
@@ -274,10 +278,11 @@ export const listPendingTransfersAdminController = async (
 };
 
 /**
+ * POST /api/platform-admin/billing/bank-transfers/:paymentId/approve
  * POST /api/admin/billing/bank-transfers/:paymentId/approve
  */
 export const approveBankTransferAdminController = async (
-  req: AuthenticatedRequest,
+  req: AdminAuthenticatedRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
@@ -300,17 +305,26 @@ export const approveBankTransferAdminController = async (
       return;
     }
 
+    const adminUser = req.admin?.user || (req as any).user;
+    if (!adminUser) {
+      throw new AppError("Platform administrator authentication required", 401);
+    }
+
     const ipAddress =
       req.ip || (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress;
     const userAgent = req.headers["user-agent"];
 
+    const adminNotes = validation.data.notes || validation.data.adminNotes;
+    const stepUpToken = validation.data.stepUpToken;
+
     const result = await billingService.approveBankTransfer({
       paymentId,
       adminUser: {
-        id: req.user!.id,
-        email: req.user!.email,
+        id: adminUser.id,
+        email: adminUser.email,
       },
-      adminNotes: validation.data.notes,
+      adminNotes,
+      stepUpToken,
       ipAddress,
       userAgent,
     });
@@ -326,10 +340,11 @@ export const approveBankTransferAdminController = async (
 };
 
 /**
+ * POST /api/platform-admin/billing/bank-transfers/:paymentId/reject
  * POST /api/admin/billing/bank-transfers/:paymentId/reject
  */
 export const rejectBankTransferAdminController = async (
-  req: AuthenticatedRequest,
+  req: AdminAuthenticatedRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
@@ -352,17 +367,24 @@ export const rejectBankTransferAdminController = async (
       return;
     }
 
+    const adminUser = req.admin?.user || (req as any).user;
+    if (!adminUser) {
+      throw new AppError("Platform administrator authentication required", 401);
+    }
+
     const ipAddress =
       req.ip || (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress;
     const userAgent = req.headers["user-agent"];
 
+    const reason = validation.data.reason || validation.data.rejectionReason!;
+
     const payment = await billingService.rejectBankTransfer({
       paymentId,
       adminUser: {
-        id: req.user!.id,
-        email: req.user!.email,
+        id: adminUser.id,
+        email: adminUser.email,
       },
-      rejectionReason: validation.data.reason,
+      rejectionReason: reason,
       ipAddress,
       userAgent,
     });
@@ -371,6 +393,65 @@ export const rejectBankTransferAdminController = async (
       success: true,
       message: "Bank transfer rejected successfully",
       data: { payment },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/platform-admin/billing/payments/:paymentId/refund
+ * POST /api/admin/billing/payments/:paymentId/refund
+ */
+export const refundPaymentAdminController = async (
+  req: AdminAuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const paymentId = getRouteParam(req, "paymentId");
+    if (!paymentId || !mongoose.Types.ObjectId.isValid(paymentId)) {
+      throw new AppError("A valid payment ID is required", 400);
+    }
+
+    const validation = adminRefundPaymentSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+      return;
+    }
+
+    const adminUser = req.admin?.user || (req as any).user;
+    if (!adminUser) {
+      throw new AppError("Platform administrator authentication required", 401);
+    }
+
+    const ipAddress =
+      req.ip || (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress;
+    const userAgent = req.headers["user-agent"];
+
+    const result = await billingService.refundPayment({
+      paymentId,
+      adminUser: {
+        id: adminUser.id,
+        email: adminUser.email,
+      },
+      reason: validation.data.reason,
+      refundAmount: validation.data.refundAmount,
+      ipAddress,
+      userAgent,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Payment refunded successfully",
+      data: result,
     });
   } catch (error) {
     next(error);

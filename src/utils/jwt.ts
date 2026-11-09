@@ -13,7 +13,7 @@ const getJwtSecret = (): string => {
 };
 
 const getAccessTokenExpiry = (): NonNullable<SignOptions["expiresIn"]> => {
-  const expiry = process.env.JWT_ACCESS_EXPIRES_IN || "15m";
+  const expiry = process.env.JWT_ACCESS_EXPIRES_IN || "7d";
 
   if (!/^\d+(s|m|h|d)$/.test(expiry)) {
     throw new Error("Invalid JWT_ACCESS_EXPIRES_IN configuration");
@@ -44,4 +44,31 @@ export const verifyAccessToken = (token: string): JwtPayload => {
   }
 
   return payload;
+};
+
+export const generateStepUpToken = (adminUserId: string): string => {
+  return jwt.sign({ purpose: "ADMIN_STEP_UP" }, getJwtSecret(), {
+    subject: adminUserId,
+    expiresIn: "7d",
+    algorithm: "HS256",
+  });
+};
+
+export const verifyStepUpToken = (
+  token: string,
+  adminUserId: string,
+): boolean => {
+  try {
+    const payload = jwt.verify(token, getJwtSecret(), {
+      algorithms: ["HS256"],
+    }) as JwtPayload;
+
+    return (
+      Boolean(payload) &&
+      payload.purpose === "ADMIN_STEP_UP" &&
+      payload.sub === adminUserId
+    );
+  } catch {
+    return false;
+  }
 };
