@@ -555,7 +555,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
           timestamp: new Date().toISOString(),
         });
 
-        
         const metaSuccess = await acceptMetaCallWithSdp(
           phoneId,
           targetCallId,
@@ -594,7 +593,7 @@ export const initCallSocket = (io: CallSocketServer): void => {
         ack?.(null, { accepted: true });
 
         // অন্য সব এজেন্টদের রিং বন্ধ করতে জানানো
-        io.to(data.workspaceId).emit("call-taken", {
+        socket.to(data.workspaceId).emit("call-taken", {
           workspaceId: data.workspaceId,
           callId: targetCallId,
           assignedTo,
