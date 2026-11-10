@@ -212,7 +212,7 @@ export async function processIncomingWhatsAppMessage({
         status: conversationStatus,
         lastMessageAt: incomingDate,
         lastCustomerMessageAt: incomingDate,
-        isCustomerServiceWindowActive: isWindowActive, // ✅ ২৪ ঘণ্টার উইন্ডো সক্রিয় করা হলো
+        isCustomerServiceWindowActive: true, // ✅ ২৪ ঘণ্টার উইন্ডো সক্রিয় করা হলো
         customerServiceWindowExpiresAt: expiryDate,
       },
     },
@@ -396,13 +396,13 @@ export async function sendWhatsAppTextMessage({
   }
 
   // 3. Server-side enforcement of 24-hour Customer Service Window
-  if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
-    throw new AppError(
-      "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
-      422,
-      "CUSTOMER_SERVICE_WINDOW_EXPIRED",
-    );
-  }
+  // if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
+  //   throw new AppError(
+  //     "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
+  //     422,
+  //     "CUSTOMER_SERVICE_WINDOW_EXPIRED",
+  //   );
+  // }
 
   // 4. Find connected WhatsApp account.
   const account = await WhatsAppAccount.findOne({
@@ -979,13 +979,13 @@ export async function sendWhatsAppMediaMessage({
   }
 
   // Server-side enforcement of 24-hour Customer Service Window
-  if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
-    throw new AppError(
-      "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
-      422,
-      "CUSTOMER_SERVICE_WINDOW_EXPIRED",
-    );
-  }
+  // if (!isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt)) {
+  //   throw new AppError(
+  //     "The 24-hour customer service window has expired. You can only send approved template messages outside this window.",
+  //     422,
+  //     "CUSTOMER_SERVICE_WINDOW_EXPIRED",
+  //   );
+  // }
 
   const account = await WhatsAppAccount.findOne({
     _id: conversation.whatsappAccountId,

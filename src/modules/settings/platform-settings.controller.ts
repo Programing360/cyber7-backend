@@ -26,11 +26,21 @@ export class PlatformSettingsController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const settings = await platformSettingsService.getSettings();
+      const { settings, runtime } =
+        await platformSettingsService.getSettingsWithRuntime();
+
+      const baseData =
+        typeof (settings as any).toObject === "function"
+          ? (settings as any).toObject()
+          : settings;
 
       res.status(200).json({
         success: true,
-        data: settings,
+        data: {
+          ...baseData,
+          settings: baseData,
+          runtime,
+        },
       });
     } catch (error) {
       next(error);

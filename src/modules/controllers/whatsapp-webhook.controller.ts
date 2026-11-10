@@ -10,10 +10,12 @@ import {
   processIncomingWhatsAppMessage,
   updateWhatsAppMessageStatus,
 } from "../services/whatsapp-message.service.js";
+import { updateCampaignRecipientStatusFromWebhook } from "../campaign/campaign.service.js";
 
 import type { WhatsAppMessageType } from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import { processWhatsAppCallingWebhook } from "../../services/whatsapp-calling-webhook.service.js";
+import { executeInboundAutomations } from "../whatsapp/automation-engine.service.js";
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -275,16 +277,16 @@ export async function receiveWhatsAppWebhook(
     const signature = req.headers["x-hub-signature-256"];
     const rawBody = req.rawBody ?? Buffer.alloc(0);
 
-    console.info("[Webhook Signature Debug]", {
-      rawBodyCaptured: Buffer.isBuffer(req.rawBody),
-      rawBodyLength: rawBody.length,
-      signaturePresent: typeof signature === "string",
-      signatureFormatValid:
-        typeof signature === "string" &&
-        /^sha256=[a-fA-F0-9]{64}$/.test(signature),
-      appSecretConfigured: Boolean(process.env.META_APP_SECRET?.trim()),
-      contentType: req.headers["content-type"],
-    });
+    // console.info("[Webhook Signature Debug]", {
+    //   rawBodyCaptured: Buffer.isBuffer(req.rawBody),
+    //   rawBodyLength: rawBody.length,
+    //   signaturePresent: typeof signature === "string",
+    //   signatureFormatValid:
+    //     typeof signature === "string" &&
+    //     /^sha256=[a-fA-F0-9]{64}$/.test(signature),
+    //   appSecretConfigured: Boolean(process.env.META_APP_SECRET?.trim()),
+    //   contentType: req.headers["content-type"],
+    // });
 
     const isValid = verifyWhatsAppWebhookSignature(
       rawBody,
@@ -299,9 +301,9 @@ export async function receiveWhatsAppWebhook(
       });
     }
 
-    console.log("👉 Incoming Webhook URL:", req.originalUrl);
-    console.log("👉 Headers:", req.headers["x-hub-signature-256"]);
-    console.log("👉 Body Object:", req.body?.object);
+    // console.log("👉 Incoming Webhook URL:", req.originalUrl);
+    // console.log("👉 Headers:", req.headers["x-hub-signature-256"]);
+    // console.log("👉 Body Object:", req.body?.object);
 
     // 2. Validate webhook payload.
     const payload = req.body as WhatsAppWebhookPayload;
@@ -333,7 +335,7 @@ export async function receiveWhatsAppWebhook(
           const phoneNumberId = value.metadata?.phone_number_id;
 
           if (!phoneNumberId) {
-            console.warn("[Calling Webhook] Missing metadata.phone_number_id");
+            // console.warn("[Calling Webhook] Missing metadata.phone_number_id");
           } else {
             try {
               await processWhatsAppCallingWebhook({
@@ -347,9 +349,9 @@ export async function receiveWhatsAppWebhook(
                 statuses: value.statuses,
               });
 
-              console.info(
-                `[Calling Webhook] Processed call events for phoneNumberId: ${phoneNumberId}`,
-              );
+              // console.info(
+              //   `[Calling Webhook] Processed call events for phoneNumberId: ${phoneNumberId}`,
+              // );
             } catch (callingError) {
               console.error(
                 "[Calling Webhook] Failed to process call events:",
@@ -403,19 +405,44 @@ export async function receiveWhatsAppWebhook(
               },
             });
 
-            console.log('result',result);
+            if (
+              "contact" in result &&
+              "conversation" in result &&
+              result.contact &&
+              result.conversation
+            ) {
+              const wsId = result.conversation.workspaceId.toString();
+              const cId = result.contact._id.toString();
+              const convId = result.conversation._id.toString();
+              const isNewContact =
+                Math.abs(Date.now() - new Date(result.contact.createdAt).getTime()) < 10000;
 
-            if (result.accountNotFound) {
-              console.warn(
-                `[Webhook] No connected account for phoneNumberId: ${phoneNumberId}, skipping message ${message.id}`,
-              );
+              setImmediate(() => {
+                executeInboundAutomations({
+                  workspaceId: wsId,
+                  contactId: cId,
+                  conversationId: convId,
+                  messageText: text || "",
+                  isNewContact,
+                }).catch((err) =>
+                  console.error("[Automation Engine Ingress Error]", err),
+                );
+              });
             }
 
-            if (result.duplicate) {
-              console.info(
-                `[Webhook] Duplicate message ignored: ${message.id}`,
-              );
-            }
+            // console.log('result',result);
+
+            // if (result.accountNotFound) {
+            //   console.warn(
+            //     `[Webhook] No connected account for phoneNumberId: ${phoneNumberId}, skipping message ${message.id}`,
+            //   );
+            // }
+
+            // if (result.duplicate) {
+            //   console.info(
+            //     `[Webhook] Duplicate message ignored: ${message.id}`,
+            //   );
+            // }
           } catch (messageError) {
             console.error(
               `[Webhook] Failed to process message ${message.id}:`,
@@ -449,12 +476,25 @@ export async function receiveWhatsAppWebhook(
 
             const errorMessage =
               status.errors?.[0]?.message ?? status.errors?.[0]?.title;
+            const mappedStatus = statusMap[status.status];
 
+            // 6a. Process 1-to-1 conversation messages
             await updateWhatsAppMessageStatus({
               whatsappAccountId: account._id.toString(),
               messageId: status.id,
-              status: statusMap[status.status],
+              status: mappedStatus,
               timestamp: status.timestamp,
+              errorMessage,
+            });
+
+            // 6b. Synchronize broadcast campaign recipient status & campaign counters
+            await updateCampaignRecipientStatusFromWebhook({
+              providerMessageId: status.id,
+              status: mappedStatus,
+              timestamp: status.timestamp,
+              errorCode: status.errors?.[0]?.code
+                ? String(status.errors[0].code)
+                : undefined,
               errorMessage,
             });
           } catch (statusError) {

@@ -16,6 +16,7 @@ export interface IPlatformSettings extends Document {
   _id: Types.ObjectId;
   key: string;
   currency: string;
+  maintenanceMode: boolean;
   sessionPolicies: ISessionPolicies;
   gatewayToggles: IGatewayToggles;
   updatedBy: Types.ObjectId | null;
@@ -54,6 +55,10 @@ const platformSettingsSchema = new Schema<IPlatformSettings>(
       default: "BDT",
       trim: true,
       uppercase: true,
+    },
+    maintenanceMode: {
+      type: Boolean,
+      default: false,
     },
     sessionPolicies: {
       type: sessionPoliciesSchema,

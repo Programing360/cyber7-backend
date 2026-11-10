@@ -16,6 +16,7 @@ import {
   resolveCampaignAudience,
   type CampaignAudienceSummary,
 } from "./campaign-audience.service.js";
+import { makeWorkspaceWhatsAppRequest } from "../services/whatsapp-api.service.js";
 import type {
   CampaignListQuery,
   CampaignRecipientListQuery,
@@ -137,10 +138,7 @@ async function validateCampaignReferences(
   ]);
 
   if (!account) {
-    throw new AppError(
-      "WhatsApp account not found in this workspace",
-      404,
-    );
+    throw new AppError("WhatsApp account not found in this workspace", 404);
   }
 
   if (!template) {
@@ -302,10 +300,7 @@ interface GetCampaignsParams {
   query: CampaignListQuery;
 }
 
-export async function getCampaigns({
-  workspaceId,
-  query,
-}: GetCampaignsParams) {
+export async function getCampaigns({ workspaceId, query }: GetCampaignsParams) {
   const workspaceObjectId = requireObjectId(
     workspaceId,
     "A valid workspace ID is required",
@@ -406,15 +401,8 @@ export async function updateDraftCampaign({
     input.whatsappAccountId ?? existing.whatsappAccountId.toString();
   const templateId = input.templateId ?? existing.templateId.toString();
 
-  if (
-    input.whatsappAccountId !== undefined ||
-    input.templateId !== undefined
-  ) {
-    await validateCampaignReferences(
-      workspaceObjectId,
-      accountId,
-      templateId,
-    );
+  if (input.whatsappAccountId !== undefined || input.templateId !== undefined) {
+    await validateCampaignReferences(workspaceObjectId, accountId, templateId);
   }
 
   const resolution = input.audience
@@ -776,17 +764,18 @@ export async function getCampaignRecipients({
       .sort({ createdAt: 1 })
       .skip((query.page - 1) * query.limit)
       .limit(query.limit),
-    CampaignRecipient.aggregate<{ _id: CampaignRecipientStatus; count: number }>(
-      [
-        {
-          $match: {
-            workspaceId: workspaceObjectId,
-            campaignId: campaignObjectId,
-          },
+    CampaignRecipient.aggregate<{
+      _id: CampaignRecipientStatus;
+      count: number;
+    }>([
+      {
+        $match: {
+          workspaceId: workspaceObjectId,
+          campaignId: campaignObjectId,
         },
-        { $group: { _id: "$status", count: { $sum: 1 } } },
-      ],
-    ),
+      },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
   ]);
 
   const summary: Record<string, number> = {
@@ -823,10 +812,9 @@ export interface DispatchCampaignRecipientParams {
 }
 
 /**
- * Dispatch guard for an individual campaign recipient.
- * Rechecks the recipient's current contact opt-out status immediately before dispatch.
- * Excludes opted-out recipients safely, marks status FAILED with CONTACT_OPTED_OUT,
- * and increments the campaign failedCount summary consistently.
+ * Production-ready dispatcher for individual campaign recipients.
+ * Atomically claims recipient, checks opt-out status, resolves Meta account & template,
+ * executes real Meta Cloud API request, and updates campaign statistics.
  */
 export async function dispatchCampaignRecipient({
   workspaceId,
@@ -846,24 +834,29 @@ export async function dispatchCampaignRecipient({
     "A valid recipient ID is required",
   );
 
-  const recipient = await CampaignRecipient.findOne({
-    _id: recipientObjectId,
-    workspaceId: workspaceObjectId,
-    campaignId: campaignObjectId,
-  });
+  // Atomically claim recipient to prevent double processing in worker threads
+  const recipient = await CampaignRecipient.findOneAndUpdate(
+    {
+      _id: recipientObjectId,
+      workspaceId: workspaceObjectId,
+      campaignId: campaignObjectId,
+      status: { $in: ["PENDING", "FAILED"] },
+    },
+    { $set: { status: "PROCESSING" } },
+    { returnDocument: "after" },
+  );
 
   if (!recipient) {
-    throw new AppError("Campaign recipient not found", 404);
+    return { success: false, skipped: true, reason: "ALREADY_PROCESSED" };
   }
 
-  // Re-check recipient contact opt-out status scoped to workspace
+  // Re-check recipient contact opt-out status
   const contact = await WhatsAppContact.findOne({
     _id: recipient.contactId,
     workspaceId: workspaceObjectId,
   });
 
   if (!contact || contact.isOptedOut) {
-    const previousStatus = recipient.status;
     recipient.status = "FAILED";
     recipient.errorCode = "CONTACT_OPTED_OUT";
     recipient.errorMessage =
@@ -871,35 +864,239 @@ export async function dispatchCampaignRecipient({
     recipient.failedAt = new Date();
     await recipient.save();
 
-    if (previousStatus !== "FAILED") {
-      await Campaign.findByIdAndUpdate(campaignObjectId, {
-        $inc: { failedCount: 1 },
-      });
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { failedCount: 1 },
+    });
+
+    return {
+      success: false,
+      skipped: true,
+      reason: "CONTACT_OPTED_OUT",
+      recipient: serializeCampaignRecipient(recipient),
+    };
+  }
+
+  // Fetch Campaign details
+  const campaign = await findCampaignOrThrow(
+    workspaceObjectId,
+    campaignObjectId,
+  );
+
+  // Fetch Connected WhatsApp Account
+  const account = await WhatsAppAccount.findOne({
+    _id: campaign.whatsappAccountId,
+    workspaceId: workspaceObjectId,
+    status: "CONNECTED",
+  });
+
+  if (!account) {
+    recipient.status = "FAILED";
+    recipient.errorCode = "ACCOUNT_NOT_CONNECTED";
+    recipient.errorMessage = "WhatsApp account is not connected";
+    recipient.failedAt = new Date();
+    await recipient.save();
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { failedCount: 1 },
+    });
+    throw new AppError("WhatsApp account is not connected", 400);
+  }
+
+  // Fetch Approved Template
+  const template = await WhatsAppTemplate.findOne({
+    _id: campaign.templateId,
+    workspaceId: workspaceObjectId,
+    status: "APPROVED",
+  });
+
+  if (!template) {
+    recipient.status = "FAILED";
+    recipient.errorCode = "TEMPLATE_NOT_APPROVED";
+    recipient.errorMessage = "WhatsApp template is not approved";
+    recipient.failedAt = new Date();
+    await recipient.save();
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { failedCount: 1 },
+    });
+    throw new AppError("Template is not approved", 422);
+  }
+
+  const recipientPhone = (recipient.phoneNumber || contact.waId || "").replace(
+    /\D/g,
+    "",
+  );
+
+  if (recipientPhone.length < 5) {
+    recipient.status = "FAILED";
+    recipient.errorCode = "INVALID_PHONE";
+    recipient.errorMessage = "Invalid recipient phone number";
+    recipient.failedAt = new Date();
+    await recipient.save();
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { failedCount: 1 },
+    });
+    throw new AppError("Invalid recipient phone number", 400);
+  }
+
+  // Execute Real Meta Cloud API Request
+  try {
+    const response = await makeWorkspaceWhatsAppRequest(
+      workspaceId,
+      account.phoneNumberId,
+      "messages",
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: recipientPhone,
+        type: "template",
+        template: {
+          name: template.name,
+          language: { code: template.language },
+          components: (campaign as any).templateComponents || [],
+        },
+      },
+    );
+
+    const providerMessageId = (
+      response.messages as Array<{ id?: string }> | undefined
+    )?.[0]?.id;
+
+    if (!providerMessageId) {
+      throw new Error("Meta API did not return a message ID");
     }
 
+    recipient.status = "SENT";
+    recipient.providerMessageId = providerMessageId;
+    recipient.sentAt = new Date();
+    recipient.errorCode = undefined;
+    recipient.errorMessage = undefined;
+    await recipient.save();
+
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { sentCount: 1 },
+    });
+
     return {
-      success: false,
-      skipped: true,
-      reason: "CONTACT_OPTED_OUT",
+      success: true,
+      providerMessageId,
       recipient: serializeCampaignRecipient(recipient),
     };
-  }
+  } catch (error: any) {
+    recipient.status = "FAILED";
+    recipient.errorCode = error.code || "META_API_ERROR";
+    recipient.errorMessage = sanitizeProviderError(error.message) ?? undefined;
+    recipient.failedAt = new Date();
+    await recipient.save();
 
-  // Ensure retries cannot bypass the opt-out check
-  if (
-    recipient.status === "FAILED" &&
-    recipient.errorCode === "CONTACT_OPTED_OUT"
-  ) {
-    return {
-      success: false,
-      skipped: true,
-      reason: "CONTACT_OPTED_OUT",
-      recipient: serializeCampaignRecipient(recipient),
-    };
-  }
+    await Campaign.findByIdAndUpdate(campaignObjectId, {
+      $inc: { failedCount: 1 },
+    });
 
-  return {
-    success: true,
-    recipient: serializeCampaignRecipient(recipient),
-  };
+    throw error;
+  }
 }
+
+export interface UpdateCampaignRecipientStatusWebhookParams {
+  providerMessageId: string;
+  status: "SENT" | "DELIVERED" | "READ" | "FAILED";
+  timestamp: string | number | Date;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+const RECIPIENT_STATUS_PRECEDENCE: Record<CampaignRecipientStatus, number> = {
+  PENDING: 1,
+  PROCESSING: 2,
+  SENT: 3,
+  DELIVERED: 4,
+  READ: 5,
+  FAILED: 6,
+};
+
+/**
+ * Synchronize Meta Webhook status updates with CampaignRecipient and Campaign metrics.
+ * Supports idempotency, status rank precedence, delivery backfilling, and failure capturing.
+ */
+export async function updateCampaignRecipientStatusFromWebhook({
+  providerMessageId,
+  status,
+  timestamp,
+  errorCode,
+  errorMessage,
+}: UpdateCampaignRecipientStatusWebhookParams): Promise<{
+  updated: boolean;
+  recipient?: ICampaignRecipient | null;
+  reason?: string;
+}> {
+  if (!providerMessageId) {
+    return { updated: false, reason: "MISSING_PROVIDER_MESSAGE_ID" };
+  }
+
+  const incomingDate =
+    timestamp instanceof Date
+      ? timestamp
+      : typeof timestamp === "number"
+        ? new Date(timestamp * 1000)
+        : /^\d+$/.test(String(timestamp))
+          ? new Date(Number(timestamp) * 1000)
+          : new Date(timestamp);
+
+  const recipient = await CampaignRecipient.findOne({
+    providerMessageId,
+  });
+
+  if (!recipient) {
+    return { updated: false, reason: "RECIPIENT_NOT_FOUND" };
+  }
+
+  // Idempotency: Ignore duplicate same-status webhooks to prevent duplicate count increments
+  if (recipient.status === status) {
+    return { updated: false, recipient, reason: "DUPLICATE_STATUS" };
+  }
+
+  // Terminal state protection: FAILED cannot be overwritten by non-failed statuses
+  if (recipient.status === "FAILED" && status !== "FAILED") {
+    return { updated: false, recipient, reason: "TERMINAL_STATE" };
+  }
+
+  // Precedence protection: Do not allow a lower status rank to overwrite higher status rank
+  const currentRank = RECIPIENT_STATUS_PRECEDENCE[recipient.status] ?? 0;
+  const newRank = RECIPIENT_STATUS_PRECEDENCE[status] ?? 0;
+  if (status !== "FAILED" && newRank < currentRank) {
+    return { updated: false, recipient, reason: "LOWER_RANK" };
+  }
+
+  const campaignUpdates: Record<string, number> = {};
+
+  if (status === "DELIVERED") {
+    recipient.status = "DELIVERED";
+    recipient.deliveredAt = recipient.deliveredAt || incomingDate;
+    campaignUpdates.deliveredCount = 1;
+  } else if (status === "READ") {
+    recipient.status = "READ";
+    recipient.readAt = recipient.readAt || incomingDate;
+    campaignUpdates.readCount = 1;
+
+    // If marked read without a prior delivered event, backfill delivery
+    if (!recipient.deliveredAt) {
+      recipient.deliveredAt = incomingDate;
+      campaignUpdates.deliveredCount = 1;
+    }
+  } else if (status === "FAILED") {
+    recipient.status = "FAILED";
+    recipient.failedAt = incomingDate;
+    recipient.errorCode = errorCode || "DELIVERY_FAILED";
+    recipient.errorMessage = sanitizeProviderError(errorMessage) ?? undefined;
+    campaignUpdates.failedCount = 1;
+  }
+
+  await recipient.save();
+
+  if (Object.keys(campaignUpdates).length > 0) {
+    await Campaign.findByIdAndUpdate(recipient.campaignId, {
+      $inc: campaignUpdates,
+    });
+  }
+
+  return { updated: true, recipient };
+}
+

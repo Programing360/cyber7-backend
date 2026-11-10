@@ -1,6 +1,10 @@
 import type { Response, NextFunction } from "express";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
-import { getWorkspaceDashboardStats } from "./dashboard.service.js";
+import {
+  getWorkspaceDashboardStats,
+  getWorkspaceAnalytics,
+  type AnalyticsPeriod,
+} from "./dashboard.service.js";
 
 export const getDashboardStatsController = async (
   req: WorkspaceRequest,
@@ -21,6 +25,33 @@ export const getDashboardStatsController = async (
       success: true,
       message: "Dashboard statistics retrieved successfully",
       data: stats,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getWorkspaceAnalyticsController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = req.params.workspaceId as string;
+    const periodQuery = (req.query.period as string) || "30d";
+    const period: AnalyticsPeriod = ["7d", "30d", "90d"].includes(periodQuery)
+      ? (periodQuery as AnalyticsPeriod)
+      : "30d";
+
+    const analytics = await getWorkspaceAnalytics({
+      workspaceId,
+      period,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Workspace analytics retrieved successfully",
+      data: analytics,
     });
   } catch (error) {
     next(error);

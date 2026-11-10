@@ -18,6 +18,9 @@ export interface IWhatsAppContact extends Document {
   optInTimestamp?: Date;
   optInSource?: "START_MESSAGE" | "USER_ACTION" | "API";
 
+  tags: string[];
+  leadStatus: "NEW" | "CONTACTED" | "QUALIFIED" | "UNQUALIFIED" | "CONVERTED";
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -81,6 +84,18 @@ const whatsappContactSchema = new Schema<IWhatsAppContact>(
     optInSource: {
       type: String,
       enum: ["START_MESSAGE", "USER_ACTION", "API"],
+    },
+    
+    tags: {
+      type: [String],
+      default: [],
+      index: true,
+    },
+    leadStatus: {
+      type: String,
+      enum: ["NEW", "CONTACTED", "QUALIFIED", "UNQUALIFIED", "CONVERTED"],
+      default: "NEW",
+      index: true,
     },
   },
   {

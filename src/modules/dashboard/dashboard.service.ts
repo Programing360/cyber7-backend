@@ -4,6 +4,8 @@ import WhatsAppContact from "../whatsapp/contact.model.js";
 import WhatsAppConversation from "../whatsapp/conversation.model.js";
 import WhatsAppMessage from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
+import Campaign from "../campaign/campaign.model.js";
+import CampaignRecipient from "../campaign/campaign-recipient.model.js";
 
 export interface DashboardStatsOverview {
   totalContacts: number;
@@ -440,5 +442,416 @@ export async function getWorkspaceDashboardStats({
     },
     recentConversations,
     messageActivity,
+  };
+}
+
+export type AnalyticsPeriod = "7d" | "30d" | "90d";
+
+export interface GetWorkspaceAnalyticsOptions {
+  workspaceId: string;
+  period?: AnalyticsPeriod;
+}
+
+export interface WorkspaceAnalyticsSummary {
+  totalSent: number;
+  delivered: number;
+  read: number;
+  failed: number;
+  pending: number;
+}
+
+export interface WorkspaceAnalyticsTrend {
+  totalSentChange: string;
+  totalSentPositive: boolean;
+  deliveredChange: string;
+  deliveredPositive: boolean;
+  readChange: string;
+  readPositive: boolean;
+  failedChange: string;
+  failedPositive: boolean;
+}
+
+export interface WorkspaceAnalyticsRates {
+  deliveryRate: number;
+  readRate: number;
+  failureRate: number;
+}
+
+export interface WorkspaceAnalyticsTimeSeriesItem {
+  date: string;
+  sent: number;
+  delivered: number;
+  read: number;
+  failed: number;
+}
+
+export interface WorkspaceAnalyticsStatusItem {
+  name: string;
+  value: number;
+}
+
+export interface WorkspaceAnalyticsCampaignItem {
+  id: string;
+  name: string;
+  sent: number;
+  delivered: number;
+  read: number;
+  failed: number;
+  status: string;
+  createdAt: string;
+}
+
+export interface WorkspaceAnalyticsResult {
+  period: AnalyticsPeriod;
+  summary: WorkspaceAnalyticsSummary;
+  trends: WorkspaceAnalyticsTrend;
+  rates: WorkspaceAnalyticsRates;
+  chartData: WorkspaceAnalyticsTimeSeriesItem[];
+  statusData: WorkspaceAnalyticsStatusItem[];
+  campaigns: WorkspaceAnalyticsCampaignItem[];
+}
+
+/**
+ * Aggregates runtime analytics for the requested workspace and period (7d, 30d, 90d).
+ * Integrates live metrics across 1-on-1 WhatsApp messages and broadcast campaign recipients.
+ * Timezone strictly aligned with Asia/Dhaka (+06:00).
+ */
+export async function getWorkspaceAnalytics({
+  workspaceId,
+  period = "30d",
+}: GetWorkspaceAnalyticsOptions): Promise<WorkspaceAnalyticsResult> {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("A valid workspace ID is required", 400);
+  }
+
+  const targetWorkspaceId = new Types.ObjectId(workspaceId);
+  const validDays = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+  const now = new Date();
+  const { startOfTodayUtc } = getDhakaDateBoundaries(now);
+  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000;
+
+  // Window for current period: validDays ending at end of today UTC
+  const periodEndUtc = new Date(
+    startOfTodayUtc.getTime() + 24 * 60 * 60 * 1000,
+  );
+  const periodStartUtc = new Date(
+    startOfTodayUtc.getTime() - (validDays - 1) * 24 * 60 * 60 * 1000,
+  );
+
+  // Window for previous period: identical duration immediately prior to current period
+  const prevPeriodEndUtc = periodStartUtc;
+  const prevPeriodStartUtc = new Date(
+    periodStartUtc.getTime() - validDays * 24 * 60 * 60 * 1000,
+  );
+
+  // Parallelized database aggregations
+  const [
+    messageCurrentAgg,
+    recipientCurrentAgg,
+    messagePrevAgg,
+    recipientPrevAgg,
+    recentCampaignsRaw,
+  ] = await Promise.all([
+    // 1. Current period outbound WhatsAppMessages grouped by date and status
+    WhatsAppMessage.aggregate<{
+      _id: { date: string; status: string };
+      count: number;
+    }>([
+      {
+        $match: {
+          workspaceId: targetWorkspaceId,
+          direction: "OUTBOUND",
+          timestamp: { $gte: periodStartUtc, $lt: periodEndUtc },
+        },
+      },
+      {
+        $project: {
+          status: 1,
+          dateStr: {
+            $dateToString: {
+              date: "$timestamp",
+              timezone: "+06:00",
+              format: "%Y-%m-%d",
+            },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { date: "$dateStr", status: "$status" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // 2. Current period dispatched campaign recipients grouped by date and status
+    CampaignRecipient.aggregate<{
+      _id: { date: string; status: string };
+      count: number;
+    }>([
+      {
+        $match: {
+          workspaceId: targetWorkspaceId,
+          status: { $in: ["SENT", "DELIVERED", "READ", "FAILED"] },
+          $or: [
+            { sentAt: { $gte: periodStartUtc, $lt: periodEndUtc } },
+            {
+              sentAt: { $exists: false },
+              createdAt: { $gte: periodStartUtc, $lt: periodEndUtc },
+            },
+          ],
+        },
+      },
+      {
+        $project: {
+          status: 1,
+          dateStr: {
+            $dateToString: {
+              date: { $ifNull: ["$sentAt", "$createdAt"] },
+              timezone: "+06:00",
+              format: "%Y-%m-%d",
+            },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { date: "$dateStr", status: "$status" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // 3. Previous period WhatsAppMessages grouped by status
+    WhatsAppMessage.aggregate<{ _id: string; count: number }>([
+      {
+        $match: {
+          workspaceId: targetWorkspaceId,
+          direction: "OUTBOUND",
+          timestamp: { $gte: prevPeriodStartUtc, $lt: prevPeriodEndUtc },
+        },
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // 4. Previous period CampaignRecipients grouped by status
+    CampaignRecipient.aggregate<{ _id: string; count: number }>([
+      {
+        $match: {
+          workspaceId: targetWorkspaceId,
+          status: { $in: ["SENT", "DELIVERED", "READ", "FAILED"] },
+          $or: [
+            { sentAt: { $gte: prevPeriodStartUtc, $lt: prevPeriodEndUtc } },
+            {
+              sentAt: { $exists: false },
+              createdAt: { $gte: prevPeriodStartUtc, $lt: prevPeriodEndUtc },
+            },
+          ],
+        },
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+
+    // 5. Recent 10 campaigns in this workspace
+    Campaign.find({ workspaceId: targetWorkspaceId })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean(),
+  ]);
+
+  // Aggregate day-by-day counts
+  const dailyStatusMap = new Map<string, number>();
+
+  for (const item of messageCurrentAgg) {
+    const key = `${item._id.date}_${item._id.status}`;
+    dailyStatusMap.set(key, (dailyStatusMap.get(key) || 0) + item.count);
+  }
+
+  for (const item of recipientCurrentAgg) {
+    const key = `${item._id.date}_${item._id.status}`;
+    dailyStatusMap.set(key, (dailyStatusMap.get(key) || 0) + item.count);
+  }
+
+  const monthNames = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+
+  const chartData: WorkspaceAnalyticsTimeSeriesItem[] = [];
+
+  let totalPending = 0;
+  let totalDeliveredSlices = 0; // DELIVERED but not yet READ (for status donut)
+  let totalDeliveredCombined = 0; // DELIVERED + READ (for KPI and rate calculations)
+  let totalRead = 0;
+  let totalFailed = 0;
+  let totalSent = 0;
+
+  for (let i = validDays - 1; i >= 0; i--) {
+    const dayStartUtc = new Date(
+      startOfTodayUtc.getTime() - i * 24 * 60 * 60 * 1000,
+    );
+    const dayInDhaka = new Date(dayStartUtc.getTime() + DHAKA_OFFSET_MS);
+
+    const yearStr = dayInDhaka.getUTCFullYear();
+    const monthStr = String(dayInDhaka.getUTCMonth() + 1).padStart(2, "0");
+    const dateStr = String(dayInDhaka.getUTCDate()).padStart(2, "0");
+    const dateKey = `${yearStr}-${monthStr}-${dateStr}`;
+
+    const displayDate = `${monthNames[dayInDhaka.getUTCMonth()]} ${dateStr}`;
+
+    const sentPending = dailyStatusMap.get(`${dateKey}_SENT`) || 0;
+    const deliveredRaw = dailyStatusMap.get(`${dateKey}_DELIVERED`) || 0;
+    const readRaw = dailyStatusMap.get(`${dateKey}_READ`) || 0;
+    const failedRaw = dailyStatusMap.get(`${dateKey}_FAILED`) || 0;
+
+    // A message that was read was also delivered
+    const deliveredTotal = deliveredRaw + readRaw;
+    const daySentTotal = sentPending + deliveredTotal + failedRaw;
+
+    totalPending += sentPending;
+    totalDeliveredSlices += deliveredRaw;
+    totalRead += readRaw;
+    totalDeliveredCombined += deliveredTotal;
+    totalFailed += failedRaw;
+    totalSent += daySentTotal;
+
+    chartData.push({
+      date: displayDate,
+      sent: daySentTotal,
+      delivered: deliveredTotal,
+      read: readRaw,
+      failed: failedRaw,
+    });
+  }
+
+  // Calculate status breakdown for donut chart
+  const statusData: WorkspaceAnalyticsStatusItem[] = [
+    { name: "Delivered", value: totalDeliveredSlices },
+    { name: "Read", value: totalRead },
+    { name: "Pending", value: totalPending },
+    { name: "Failed", value: totalFailed },
+  ];
+
+  // Calculate rates
+  const deliveryRate =
+    totalSent > 0
+      ? Number(((totalDeliveredCombined / totalSent) * 100).toFixed(1))
+      : 0;
+  const readRate =
+    totalDeliveredCombined > 0
+      ? Number(((totalRead / totalDeliveredCombined) * 100).toFixed(1))
+      : 0;
+  const failureRate =
+    totalSent > 0
+      ? Number(((totalFailed / totalSent) * 100).toFixed(1))
+      : 0;
+
+  // Process previous period for trends
+  let prevSentPending = 0;
+  let prevDeliveredRaw = 0;
+  let prevReadRaw = 0;
+  let prevFailedRaw = 0;
+
+  for (const item of messagePrevAgg) {
+    if (item._id === "SENT") prevSentPending += item.count;
+    else if (item._id === "DELIVERED") prevDeliveredRaw += item.count;
+    else if (item._id === "READ") prevReadRaw += item.count;
+    else if (item._id === "FAILED") prevFailedRaw += item.count;
+  }
+
+  for (const item of recipientPrevAgg) {
+    if (item._id === "SENT") prevSentPending += item.count;
+    else if (item._id === "DELIVERED") prevDeliveredRaw += item.count;
+    else if (item._id === "READ") prevReadRaw += item.count;
+    else if (item._id === "FAILED") prevFailedRaw += item.count;
+  }
+
+  const prevDeliveredCombined = prevDeliveredRaw + prevReadRaw;
+  const prevTotalSent = prevSentPending + prevDeliveredCombined + prevFailedRaw;
+
+  function calcTrend(curr: number, prev: number) {
+    if (prev === 0) {
+      if (curr > 0) return { change: "+100%", positive: true };
+      return { change: "0.0%", positive: true };
+    }
+    const diff = curr - prev;
+    const pct = ((diff / prev) * 100).toFixed(1);
+    return {
+      change: `${diff >= 0 ? "+" : ""}${pct}%`,
+      positive: diff >= 0,
+    };
+  }
+
+  const sentTrend = calcTrend(totalSent, prevTotalSent);
+  const deliveredTrend = calcTrend(
+    totalDeliveredCombined,
+    prevDeliveredCombined,
+  );
+  const readTrend = calcTrend(totalRead, prevReadRaw);
+  const failedTrend = calcTrend(totalFailed, prevFailedRaw);
+
+  // Format campaigns
+  const campaigns: WorkspaceAnalyticsCampaignItem[] = recentCampaignsRaw.map(
+    (c) => ({
+      id: c._id.toString(),
+      name: c.name,
+      sent: c.sentCount || 0,
+      delivered: c.deliveredCount || 0,
+      read: c.readCount || 0,
+      failed: c.failedCount || 0,
+      status: c.status || "DRAFT",
+      createdAt: c.createdAt
+        ? new Date(c.createdAt).toISOString()
+        : new Date().toISOString(),
+    }),
+  );
+
+  return {
+    period,
+    summary: {
+      totalSent,
+      delivered: totalDeliveredCombined,
+      read: totalRead,
+      failed: totalFailed,
+      pending: totalPending,
+    },
+    trends: {
+      totalSentChange: sentTrend.change,
+      totalSentPositive: sentTrend.positive,
+      deliveredChange: deliveredTrend.change,
+      deliveredPositive: deliveredTrend.positive,
+      readChange: readTrend.change,
+      readPositive: readTrend.positive,
+      failedChange: failedTrend.change,
+      failedPositive: failedTrend.positive,
+    },
+    rates: {
+      deliveryRate,
+      readRate,
+      failureRate,
+    },
+    chartData,
+    statusData,
+    campaigns,
   };
 }

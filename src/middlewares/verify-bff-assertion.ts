@@ -32,6 +32,12 @@ export async function requireBffAssertion(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // If already verified on an outer router for this exact request, pass through cleanly
+  if (req.bffAssertion) {
+    next();
+    return;
+  }
+
   // উভয় স্ট্যান্ডার্ড হেডার চেক করা
 
 

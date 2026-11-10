@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import type { Response, NextFunction } from "express";
 
 import Membership from "../modules/workspace/membership.model.js";
+import Workspace from "../modules/workspace/workspace.model.js";
 import type { AuthenticatedRequest } from "./authenticate.js";
 
 export interface WorkspaceRequest extends AuthenticatedRequest {
@@ -26,7 +27,12 @@ export const requireWorkspaceMembership = async (
       return;
     }
 
-    const workspaceId = req.params.workspaceId as string;
+    const workspaceId = (
+      req.params.workspaceId ||
+      (req.query.workspaceId as string) ||
+      (req.headers["x-workspace-id"] as string) ||
+      req.body?.workspaceId
+    ) as string;
 
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       res.status(400).json({
@@ -43,6 +49,39 @@ export const requireWorkspaceMembership = async (
     }).select("_id workspaceId role");
 
     if (!membership) {
+      // 1. Check if user is the direct workspace owner
+      const workspace = await Workspace.findById(workspaceId).select(
+        "_id ownerId",
+      );
+      if (workspace && workspace.ownerId?.toString() === req.user.id) {
+        req.workspace = {
+          id: workspace._id.toString(),
+          role: "OWNER",
+          membershipId: `owner-${workspace._id.toString()}`,
+        };
+        next();
+        return;
+      }
+
+      // 2. Check if user is a platform admin (SUPER_ADMIN or FINANCE_ADMIN)
+      const userPlatformRole = String(
+        req.user.platformRole || req.user.role || "",
+      ).toUpperCase();
+      if (
+        userPlatformRole === "SUPER_ADMIN" ||
+        userPlatformRole === "FINANCE_ADMIN" ||
+        req.user.role === "admin" ||
+        req.user.role === "super_admin"
+      ) {
+        req.workspace = {
+          id: workspaceId,
+          role: "OWNER",
+          membershipId: `admin-${req.user.id}`,
+        };
+        next();
+        return;
+      }
+
       res.status(403).json({
         success: false,
         message: "You do not have access to this workspace",

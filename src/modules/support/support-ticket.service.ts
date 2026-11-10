@@ -2,12 +2,14 @@ import mongoose, { type Types } from "mongoose";
 import SupportTicket, {
   type ISupportTicket,
   type TicketStatus,
+  type TicketPriority,
 } from "./support-ticket.model.js";
 import Workspace from "../workspace/workspace.model.js";
 import User from "../auth/user.model.js";
 import { adminSecurityAuditService } from "../admin-auth/admin-security-audit.service.js";
 import type {
   CreateTicketInput,
+  CreateCustomerTicketInput,
   ListTicketsQuery,
   AddTicketMessageInput,
 } from "./support-ticket.validation.js";
@@ -18,6 +20,12 @@ export interface AdminActorContext {
   sessionId?: string | Types.ObjectId;
   ipAddress?: string;
   userAgent?: string;
+}
+
+export interface CustomerActorContext {
+  userId: string;
+  userName?: string;
+  userEmail: string;
 }
 
 export class SupportTicketService {
@@ -61,6 +69,12 @@ export class SupportTicketService {
     page: number;
     pageSize: number;
     totalPages: number;
+    stats?: {
+      total: number;
+      open: number;
+      inProgress: number;
+      resolved: number;
+    };
   }> {
     const filter: Record<string, any> = {};
 
@@ -70,6 +84,13 @@ export class SupportTicketService {
 
     if (query.priority) {
       filter.priority = query.priority;
+    }
+
+    if (
+      query.workspaceId &&
+      mongoose.Types.ObjectId.isValid(query.workspaceId)
+    ) {
+      filter.workspaceId = new mongoose.Types.ObjectId(query.workspaceId);
     }
 
     if (query.search?.trim()) {
@@ -100,12 +121,51 @@ export class SupportTicketService {
 
     const totalPages = Math.ceil(total / pageSize) || 1;
 
+    const statsFilter: Record<string, any> = {};
+    if (
+      query.workspaceId &&
+      mongoose.Types.ObjectId.isValid(query.workspaceId)
+    ) {
+      statsFilter.workspaceId = new mongoose.Types.ObjectId(query.workspaceId);
+    }
+
+    const [allTotal, openTotal, inProgressTotal, resolvedTotal, urgentTotal] =
+      await Promise.all([
+        SupportTicket.countDocuments(statsFilter),
+        SupportTicket.countDocuments({
+          ...statsFilter,
+          status: "OPEN",
+        }),
+        SupportTicket.countDocuments({
+          ...statsFilter,
+          status: "IN_PROGRESS",
+        }),
+        SupportTicket.countDocuments({
+          ...statsFilter,
+          status: { $in: ["RESOLVED", "CLOSED"] },
+        }),
+        SupportTicket.countDocuments({
+          ...statsFilter,
+          priority: { $in: ["HIGH", "URGENT"] },
+          status: { $nin: ["RESOLVED", "CLOSED"] },
+        }),
+      ]);
+
+    const stats = {
+      total: allTotal,
+      open: openTotal,
+      inProgress: inProgressTotal,
+      resolved: resolvedTotal,
+      urgent: urgentTotal,
+    };
+
     return {
       items: items as unknown as ISupportTicket[],
       total,
       page,
       pageSize,
       totalPages,
+      stats,
     };
   }
 
@@ -311,6 +371,192 @@ export class SupportTicketService {
       },
     });
 
+    return ticket;
+  }
+
+  /**
+   * Customer: Create a support ticket from workspace dashboard
+   */
+  public async createTicketAsCustomer(
+    input: CreateCustomerTicketInput,
+    actor: CustomerActorContext,
+  ): Promise<ISupportTicket> {
+    const wsId = input.workspaceId;
+    if (!wsId || !mongoose.Types.ObjectId.isValid(wsId)) {
+      throw new Error("A valid workspace ID is required to create a ticket.");
+    }
+
+    const ws = await Workspace.findById(wsId);
+    const workspaceName = ws?.name || "Workspace";
+
+    const ticketNumber = await this.generateNextTicketNumber();
+    const senderId = new mongoose.Types.ObjectId(actor.userId);
+    const customerName =
+      input.customerName?.trim() || actor.userName || "Customer";
+    const customerEmail =
+      input.customerEmail?.trim().toLowerCase() ||
+      actor.userEmail.toLowerCase();
+
+    const ticket = new SupportTicket({
+      ticketNumber,
+      workspaceId: new mongoose.Types.ObjectId(wsId),
+      workspaceName,
+      customerName,
+      customerEmail,
+      subject: input.subject.trim(),
+      category: input.category?.trim() || "Technical Issue",
+      priority: (input.priority || "MEDIUM").toUpperCase(),
+      status: "OPEN",
+      assignedAdmin: null,
+      messages: [
+        {
+          senderId,
+          senderRole: "CUSTOMER",
+          senderName: customerName,
+          content: input.description.trim(),
+          attachments: input.attachments || [],
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    await ticket.save();
+    return ticket;
+  }
+
+  /**
+   * Customer: Get details of a ticket belonging to their workspace
+   */
+  public async getTicketDetailsAsCustomer(
+    ticketId: string,
+    workspaceId: string,
+  ): Promise<ISupportTicket> {
+    const wsObjectId = new mongoose.Types.ObjectId(workspaceId);
+    let query: Record<string, unknown> = {
+      ticketNumber: ticketId,
+      workspaceId: wsObjectId,
+    };
+    if (mongoose.Types.ObjectId.isValid(ticketId)) {
+      query = {
+        $or: [{ _id: ticketId }, { ticketNumber: ticketId }],
+        workspaceId: wsObjectId,
+      };
+    }
+
+    const ticket = await SupportTicket.findOne(query)
+      .populate("assignedAdmin", "name email platformRole")
+      .lean();
+
+    if (!ticket) {
+      throw new Error(`Support ticket '${ticketId}' not found.`);
+    }
+
+    return ticket as unknown as ISupportTicket;
+  }
+
+  /**
+   * Customer: Append message reply to ticket
+   */
+  public async addMessageAsCustomer(
+    ticketId: string,
+    workspaceId: string,
+    content: string,
+    actor: CustomerActorContext,
+  ): Promise<ISupportTicket> {
+    const wsObjectId = new mongoose.Types.ObjectId(workspaceId);
+    let query: Record<string, unknown> = {
+      ticketNumber: ticketId,
+      workspaceId: wsObjectId,
+    };
+    if (mongoose.Types.ObjectId.isValid(ticketId)) {
+      query = {
+        $or: [{ _id: ticketId }, { ticketNumber: ticketId }],
+        workspaceId: wsObjectId,
+      };
+    }
+
+    const ticket = await SupportTicket.findOne(query);
+    if (!ticket) {
+      throw new Error(`Support ticket '${ticketId}' not found.`);
+    }
+
+    ticket.messages.push({
+      senderId: new mongoose.Types.ObjectId(actor.userId),
+      senderRole: "CUSTOMER",
+      senderName: actor.userName || "Customer",
+      content: content.trim(),
+      attachments: [],
+      createdAt: new Date(),
+    });
+
+    // If ticket was resolved or closed, customer reply reopens it
+    if (ticket.status === "RESOLVED" || ticket.status === "CLOSED") {
+      ticket.status = "OPEN";
+    }
+
+    await ticket.save();
+    return ticket;
+  }
+
+  /**
+   * Customer: Update ticket status (e.g. resolve or reopen)
+   */
+  public async updateStatusAsCustomer(
+    ticketId: string,
+    workspaceId: string,
+    status: TicketStatus,
+    _actor: CustomerActorContext,
+  ): Promise<ISupportTicket> {
+    const wsObjectId = new mongoose.Types.ObjectId(workspaceId);
+    let query: Record<string, unknown> = {
+      ticketNumber: ticketId,
+      workspaceId: wsObjectId,
+    };
+    if (mongoose.Types.ObjectId.isValid(ticketId)) {
+      query = {
+        $or: [{ _id: ticketId }, { ticketNumber: ticketId }],
+        workspaceId: wsObjectId,
+      };
+    }
+
+    const ticket = await SupportTicket.findOne(query);
+    if (!ticket) {
+      throw new Error(`Support ticket '${ticketId}' not found.`);
+    }
+
+    ticket.status = status;
+    await ticket.save();
+    return ticket;
+  }
+
+  /**
+   * Customer: Update ticket priority
+   */
+  public async updatePriorityAsCustomer(
+    ticketId: string,
+    workspaceId: string,
+    priority: TicketPriority,
+    _actor: CustomerActorContext,
+  ): Promise<ISupportTicket> {
+    const wsObjectId = new mongoose.Types.ObjectId(workspaceId);
+    let query: Record<string, unknown> = {
+      ticketNumber: ticketId,
+      workspaceId: wsObjectId,
+    };
+    if (mongoose.Types.ObjectId.isValid(ticketId)) {
+      query = {
+        $or: [{ _id: ticketId }, { ticketNumber: ticketId }],
+        workspaceId: wsObjectId,
+      };
+    }
+
+    const ticket = await SupportTicket.findOne(query);
+    if (!ticket) {
+      throw new Error(`Support ticket '${ticketId}' not found.`);
+    }
+
+    ticket.priority = priority;
+    await ticket.save();
     return ticket;
   }
 }

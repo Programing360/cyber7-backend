@@ -34,6 +34,8 @@ import platformSettingsRouter from "../src/modules/settings/platform-settings.ro
 import { platformAdminBillingRouter } from "../src/modules/billing/billing.routes.js";
 import adminAuthRouter from "../src/modules/admin-auth/admin-auth.routes.js";
 import dashboardRouter from "../src/modules/platform-admin-dashboard/dashboard.routes.js";
+import { requireBffAssertion } from "../src/middlewares/verify-bff-assertion.js";
+import { authenticateAdminSession } from "../src/middlewares/authenticate-admin-session.js";
 
 describe("Step 6: Support Desk Infrastructure & Platform Governance Test Suite", () => {
   const adminActor = {
@@ -578,6 +580,52 @@ describe("Step 6: Support Desk Infrastructure & Platform Governance Test Suite",
             r.path === "/auth/sessions/purge" && r.methods.includes("post"),
         ),
       );
+    });
+  });
+
+  describe("7. BFF Assertion & Admin Session Subrouter Idempotency", () => {
+    it("should pass through cleanly when req.bffAssertion is already verified by an outer router", async () => {
+      let nextCalled = false;
+      const req: any = {
+        bffAssertion: {
+          jti: "test-jti-123",
+          method: "GET",
+          path: "/api/platform-admin/dashboard/support/tickets",
+        },
+        headers: {},
+      };
+      const res: any = {
+        status: () => res,
+        json: () => res,
+      };
+      await requireBffAssertion(req, res, () => {
+        nextCalled = true;
+      });
+      assert.strictEqual(nextCalled, true);
+    });
+
+    it("should pass through cleanly when req.admin is already set by an outer router", async () => {
+      let nextCalled = false;
+      const req: any = {
+        admin: {
+          user: {
+            id: "admin-1",
+            email: "admin@test.com",
+            name: "Admin",
+            platformRole: "SUPER_ADMIN",
+          },
+          session: { id: "sess-1", status: "ACTIVE" },
+        },
+        headers: {},
+      };
+      const res: any = {
+        status: () => res,
+        json: () => res,
+      };
+      await authenticateAdminSession(req, res, () => {
+        nextCalled = true;
+      });
+      assert.strictEqual(nextCalled, true);
     });
   });
 });

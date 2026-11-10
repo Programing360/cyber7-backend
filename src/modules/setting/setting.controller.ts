@@ -1,5 +1,6 @@
 import type { Response, NextFunction } from "express";
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 import {
   getUserProfile,
   updateUserProfile,
@@ -10,6 +11,142 @@ import {
   updateProfileSchema,
   changePasswordSchema,
 } from "../auth/auth.validation.js";
+import {
+  workspaceSettingsService,
+  type SettingsActorContext,
+} from "./workspace-settings.service.js";
+import { updateWorkspaceSettingsSchema } from "./setting.validation.js";
+
+function resolveWorkspaceId(req: WorkspaceRequest | AuthenticatedRequest): string {
+  return (
+    (req as WorkspaceRequest).workspace?.id ||
+    req.params?.workspaceId ||
+    (req.query?.workspaceId as string) ||
+    (req.headers?.["x-workspace-id"] as string) ||
+    req.body?.workspaceId ||
+    ""
+  );
+}
+
+function getActorContext(req: AuthenticatedRequest): SettingsActorContext {
+  return {
+    userId: String(req.user?.id || (req.user as any)?._id || ""),
+    userEmail: req.user?.email || "",
+    userName: req.user?.name || "",
+  };
+}
+
+// ─── Workspace Settings Controllers ──────────────────────────────────────────
+
+export const getWorkspaceSettingsController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = resolveWorkspaceId(req);
+    if (!workspaceId) {
+      res.status(400).json({
+        success: false,
+        message: "A valid workspace ID is required",
+      });
+      return;
+    }
+
+    const actor = getActorContext(req);
+    const settings = await workspaceSettingsService.getSettings(workspaceId, actor);
+
+    res.status(200).json({
+      success: true,
+      message: "Workspace settings retrieved successfully",
+      data: {
+        settings,
+      },
+    });
+  } catch (error: unknown) {
+    next(error);
+  }
+};
+
+export const updateWorkspaceSettingsController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = resolveWorkspaceId(req);
+    if (!workspaceId) {
+      res.status(400).json({
+        success: false,
+        message: "A valid workspace ID is required",
+      });
+      return;
+    }
+
+    const validation = updateWorkspaceSettingsSchema.safeParse(req.body);
+    if (!validation.success) {
+      res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validation.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+      return;
+    }
+
+    const actor = getActorContext(req);
+    const updatedSettings = await workspaceSettingsService.updateSettings(
+      workspaceId,
+      validation.data,
+      actor,
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Workspace settings updated successfully",
+      data: {
+        settings: updatedSettings,
+      },
+    });
+  } catch (error: unknown) {
+    next(error);
+  }
+};
+
+export const regenerateApiKeyController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = resolveWorkspaceId(req);
+    if (!workspaceId) {
+      res.status(400).json({
+        success: false,
+        message: "A valid workspace ID is required",
+      });
+      return;
+    }
+
+    const actor = getActorContext(req);
+    const result = await workspaceSettingsService.regenerateApiKey(
+      workspaceId,
+      actor,
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "New API key generated successfully",
+      data: result,
+    });
+  } catch (error: unknown) {
+    next(error);
+  }
+};
+
+// ─── User Profile & Password Controllers ─────────────────────────────────────
 
 export const getSettingsProfileController = async (
   req: AuthenticatedRequest,
@@ -140,4 +277,3 @@ export const changeSettingsPasswordController = async (
     next(error);
   }
 };
-

@@ -210,8 +210,12 @@ export const resendRegistrationOtp = async (input: ResendOtpInput) => {
 // ধাপ ৪: লগইন এবং ৭ দিন পার হলে সাবস্ক্রিপশন ব্লক চেক
 export const loginUser = async (input: LoginInput) => {
   const user = await User.findOne({ email: input.email }).select("+password");
-
   if (!user) {
+    throw new AuthError("Invalid email or password", 401);
+  }
+
+  const isPasswordValid = await comparePassword(input.password, user.password);
+  if (!isPasswordValid) {
     throw new AuthError("Invalid email or password", 401);
   }
 
@@ -219,7 +223,7 @@ export const loginUser = async (input: LoginInput) => {
     throw new AuthError("This account is suspended or inactive.", 403);
   }
 
-  const isPasswordValid = await comparePassword(input.password, user.password);
+  // const isPasswordValid = await comparePassword(input.password, user.password);
   if (!isPasswordValid) {
     throw new AuthError("Invalid email or password", 401);
   }
@@ -262,6 +266,8 @@ export const loginUser = async (input: LoginInput) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      platformRole: user.platformRole,
+      isEmailVerified: user.isEmailVerified,
       subscriptionStatus: user.subscriptionStatus,
       trialStartDate: user.trialStartDate,
       trialEndDate: user.trialEndDate,

@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { adminAuthController } from "./admin-auth.controller.js";
+import { adminAuthService } from "./admin-auth.service.js";
 import { requireBffAssertion } from "../../middlewares/verify-bff-assertion.js";
 import {
   authenticateAdminSession,
@@ -10,19 +11,14 @@ import { redirectIfAdminAuthenticated } from "../../middlewares/redirect-if-admi
 import { adminSessionService } from "./admin-session.service.js";
 import { parseCookieHeader } from "./admin-cookie.util.js";
 import { loadAdminSessionEnv } from "../../config/env.js";
+import { verifyAccessToken } from "../../utils/jwt.js";
+import User from "../auth/user.model.js";
 
 const router = Router();
 // সেশন চেক করার জন্য লাইটওয়েট রাউট (কুকি থাকলে রোল রিটার্ন করবে, না থাকলে authenticated: false)
 router.get("/session-check", async (req: Request, res: Response) => {
   try {
-    console.log("[Admin Session Check] Incoming request:", {
-      headers: req.headers,
-      cookies: (req as Request & { cookies?: Record<string, string> }).cookies,
-    });
     const config = loadAdminSessionEnv();
-
-    console.log("[Admin Session Check] Loaded config:", config);
-
     const cookieName = config.ADMIN_SESSION_COOKIE_NAME;
 
     const cookieMap =
@@ -31,61 +27,127 @@ router.get("/session-check", async (req: Request, res: Response) => {
           cookies?: Record<string, string>;
         }
       ).cookies || parseCookieHeader(req.headers?.cookie);
-    console.log("[Admin Session Check] Parsed cookies:", cookieMap);
 
     const token = cookieMap?.[cookieName];
 
-    if (!token) {
-      res.status(200).json({
-        success: true,
-        authenticated: false,
-        reason: "ADMIN_SESSION_COOKIE_MISSING",
-      });
-      return;
+    // ১. ডেডিকেটেড অ্যাডমিন সেশন কুকি চেক
+    if (token) {
+      const result = await adminSessionService.authenticateAdminSession(token);
+
+      if (result.success && result.user) {
+        const allowedRoles = ["SUPER_ADMIN", "FINANCE_ADMIN"];
+
+        if (allowedRoles.includes(result.user.platformRole)) {
+          res.status(200).json({
+            success: true,
+            authenticated: true,
+            platformRole: result.user.platformRole,
+            user: {
+              id: String(result.user._id),
+              email: result.user.email,
+              name: result.user.name,
+            },
+          });
+          return;
+        }
+      }
     }
 
-    const result = await adminSessionService.authenticateAdminSession(token);
-
-    console.log(result);
-
-    if (!result.success) {
-      res.status(200).json({
-        success: true,
-        authenticated: false,
-        reason: result.code || "INVALID_SESSION",
-      });
-      return;
+    // ২. ফলব্যাক: অলরেডি লগইন করা SUPER_ADMIN / FINANCE_ADMIN ইউজার কিনা যাচাই (Bearer টোকেন বা অ্যাক্সেস কুকি)
+    let accessToken: string | undefined;
+    const authHeader = req.headers?.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      accessToken = authHeader.slice("Bearer ".length).trim();
+    }
+    if (!accessToken) {
+      accessToken =
+        cookieMap?.["vexchat_access_token"] ||
+        cookieMap?.["accessToken"] ||
+        cookieMap?.["token"];
     }
 
-    if (!result.user) {
-      res.status(200).json({
-        success: true,
-        authenticated: false,
-        reason: "INVALID_SESSION",
-      });
-      return;
+    if (accessToken) {
+      try {
+        const payload = verifyAccessToken(accessToken);
+        if (payload?.sub) {
+          const user = await User.findById(payload.sub).select(
+            "_id name email role platformRole isActive tokenInvalidBefore isEmailVerified",
+          );
+
+          const isInvalid =
+            !user ||
+            !user.isActive ||
+            Boolean(
+              user.tokenInvalidBefore &&
+                payload.iat &&
+                payload.iat * 1000 <
+                  new Date(user.tokenInvalidBefore).getTime(),
+            );
+
+          const allowedRoles = ["SUPER_ADMIN", "FINANCE_ADMIN"];
+          if (user && !isInvalid && allowedRoles.includes(user.platformRole)) {
+            // ইউজার অলরেডি ভেরিফাইড প্ল্যাটফর্ম অ্যাডমিন; স্বয়ংক্রিয়ভাবে অ্যাডমিন সেশন তৈরি ও কুকি সেট
+            const forwarded = req.headers["x-forwarded-for"];
+            const clientIp =
+              typeof forwarded === "string"
+                ? forwarded.split(",")[0].trim()
+                : req.ip || undefined;
+            const userAgent =
+              typeof req.headers["user-agent"] === "string"
+                ? req.headers["user-agent"]
+                : undefined;
+
+            const authResult = await adminAuthService.completeChallengeSession({
+              userId: user._id,
+              ipAddress: clientIp,
+              userAgent,
+            });
+
+            if (
+              authResult.success &&
+              authResult.cookieOptions &&
+              authResult.rawToken
+            ) {
+              res.cookie(
+                authResult.cookieOptions.name,
+                authResult.rawToken,
+                authResult.cookieOptions.options,
+              );
+            }
+
+            res.cookie("user_role", user.platformRole, {
+              path: "/",
+              httpOnly: false,
+              sameSite: "lax",
+              secure: process.env.NODE_ENV === "production",
+            });
+
+            res.status(200).json({
+              success: true,
+              authenticated: true,
+              platformRole: user.platformRole,
+              user: {
+                id: String(user._id),
+                email: user.email,
+                name: user.name,
+              },
+            });
+            return;
+          }
+        }
+      } catch (tokenErr) {
+        console.warn(
+          "[Admin Session Check] Access token verification failed:",
+          tokenErr,
+        );
+      }
     }
 
-    const allowedRoles = ["SUPER_ADMIN", "FINANCE_ADMIN"];
-
-    if (!allowedRoles.includes(result.user.platformRole)) {
-      res.status(200).json({
-        success: true,
-        authenticated: false,
-        reason: "ROLE_UNAUTHORIZED",
-      });
-      return;
-    }
-
+    // কুকি বা ভ্যালিড প্ল্যাটফর্ম অ্যাডমিন টোকেন কোনোটিই না থাকলে
     res.status(200).json({
       success: true,
-      authenticated: true,
-      platformRole: result.user.platformRole,
-      user: {
-        id: String(result.user._id),
-        email: result.user.email,
-        name: result.user.name,
-      },
+      authenticated: false,
+      reason: "ADMIN_SESSION_COOKIE_MISSING",
     });
   } catch (error) {
     console.error("[Admin Session Check]", error);

@@ -21,6 +21,7 @@ import {
   listWorkspaceInvitationsController,
   revokeWorkspaceInvitationController,
 } from "./invitation-management/invitation-management.controller.js";
+import { getWorkspaceAnalyticsController } from "../dashboard/dashboard.controller.js";
 
 const workspaceRouter = Router();
 
@@ -46,6 +47,13 @@ workspaceRouter.get(
   "/:workspaceId/members",
   requireWorkspaceMembership,
   listWorkspaceMembersController,
+);
+
+workspaceRouter.get(
+  "/:workspaceId/analytics",
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getWorkspaceAnalyticsController,
 );
 
 workspaceRouter.post(

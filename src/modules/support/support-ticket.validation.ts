@@ -28,7 +28,18 @@ export const createTicketSchema = z.object({
 });
 
 export const updateTicketStatusSchema = z.object({
-  status: ticketStatusEnum,
+  status: z.preprocess(
+    (val) =>
+      typeof val === "string" ? val.toUpperCase().replace(/\s+/g, "_") : val,
+    ticketStatusEnum,
+  ),
+});
+
+export const updateTicketPrioritySchema = z.object({
+  priority: z.preprocess(
+    (val) => (typeof val === "string" ? val.toUpperCase() : val),
+    ticketPriorityEnum,
+  ),
 });
 
 export const assignTicketSchema = z.object({
@@ -44,22 +55,82 @@ export const addTicketMessageSchema = z.object({
   attachments: z.array(supportAttachmentSchema).optional().default([]),
 });
 
+export const createCustomerTicketSchema = z.object({
+  workspaceId: z
+    .string()
+    .trim()
+    .regex(/^[0-9a-fA-F]{24}$/, "Invalid workspace ID format")
+    .optional(),
+  subject: z.string().trim().min(3, "Subject must be at least 3 characters"),
+  priority: z
+    .preprocess(
+      (val) => (typeof val === "string" ? val.toUpperCase() : val),
+      ticketPriorityEnum,
+    )
+    .default("MEDIUM"),
+  category: z.string().trim().default("Technical Issue"),
+  description: z.string().trim().min(1, "Description is required"),
+  customerName: z.string().trim().optional(),
+  customerEmail: z
+    .string()
+    .trim()
+    .email("Invalid customer email address")
+    .optional(),
+  attachments: z.array(supportAttachmentSchema).optional().default([]),
+});
+
 export const listTicketsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(10),
+  workspaceId: z
+    .preprocess(
+      (val) =>
+        typeof val === "string" && val.trim() ? val.trim() : undefined,
+      z
+        .string()
+        .regex(/^[0-9a-fA-F]{24}$/, "Invalid workspace ID format")
+        .optional(),
+    )
+    .optional(),
   status: z
-    .union([ticketStatusEnum, z.literal("ALL")])
-    .optional()
-    .transform((val) => (val === "ALL" ? undefined : val)),
+    .preprocess((val) => {
+      if (
+        !val ||
+        typeof val !== "string" ||
+        !val.trim() ||
+        val.toUpperCase() === "ALL"
+      ) {
+        return undefined;
+      }
+      return val.toUpperCase().replace(/\s+/g, "_");
+    }, ticketStatusEnum.optional())
+    .optional(),
   priority: z
-    .union([ticketPriorityEnum, z.literal("ALL")])
-    .optional()
-    .transform((val) => (val === "ALL" ? undefined : val)),
-  search: z.string().trim().optional(),
+    .preprocess((val) => {
+      if (
+        !val ||
+        typeof val !== "string" ||
+        !val.trim() ||
+        val.toUpperCase() === "ALL"
+      ) {
+        return undefined;
+      }
+      return val.toUpperCase();
+    }, ticketPriorityEnum.optional())
+    .optional(),
+  search: z
+    .preprocess(
+      (val) =>
+        typeof val === "string" && val.trim() ? val.trim() : undefined,
+      z.string().optional(),
+    )
+    .optional(),
 });
 
 export type CreateTicketInput = z.infer<typeof createTicketSchema>;
+export type CreateCustomerTicketInput = z.infer<typeof createCustomerTicketSchema>;
 export type UpdateTicketStatusInput = z.infer<typeof updateTicketStatusSchema>;
+export type UpdateTicketPriorityInput = z.infer<typeof updateTicketPrioritySchema>;
 export type AssignTicketInput = z.infer<typeof assignTicketSchema>;
 export type AddTicketMessageInput = z.infer<typeof addTicketMessageSchema>;
 export type ListTicketsQuery = z.infer<typeof listTicketsQuerySchema>;

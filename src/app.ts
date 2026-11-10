@@ -23,6 +23,7 @@ import adminAuthRouter from "./modules/admin-auth/admin-auth.routes.js";
 import platformAdminDashboardRouter from "./modules/platform-admin-dashboard/dashboard.routes.js";
 import platformAdminGovernanceRouter from "./modules/platform-admin-dashboard/governance.routes.js";
 import supportTicketRouter from "./modules/support/support-ticket.routes.js";
+import customerSupportRouter from "./modules/support/customer-support.routes.js";
 import platformSettingsRouter from "./modules/settings/platform-settings.routes.js";
 
 import { errorHandler } from "./middlewares/error-handler.js";
@@ -43,6 +44,7 @@ import {
 import { authenticate } from "./middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "./middlewares/require-workspace-membership.js";
 import { requireRole } from "./middlewares/require-role.js";
+import automationRoutes from "./router/automation.routes.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -84,9 +86,12 @@ const corsOptions: cors.CorsOptions = {
     "Content-Type",
     "Authorization",
     "X-Requested-With",
+    "Accept",
+    "x-workspace-id",
     "x-bff-assertion",
     "x-admin-bff-assertion",
     "x-admin-session-token",
+    "x-vercel-protection-bypass",
   ],
 };
 
@@ -155,6 +160,7 @@ app.use("/api", internalCronRouter);
 // Workspace and billing.
 app.use("/api/workspaces", workspaceRouter);
 
+
 // Workspace WhatsApp Media and Messaging Routes (drop-in aliases for frontend convenience)
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/media/:mediaId",
@@ -170,6 +176,9 @@ app.post(
   requireRole("OWNER", "ADMIN", "AGENT"),
   sendWhatsAppMediaMessageController,
 );
+// Register router with workspace prefix
+app.use("/api/workspaces/:workspaceId/automations", automationRoutes);
+
 app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
 app.use("/api/admin/billing", platformAdminBillingRouter);
@@ -185,6 +194,10 @@ app.use("/api/admin", platformAdminGovernanceRouter);
 app.use("/api/platform-admin/support", supportTicketRouter);
 app.use("/api/admin/support", supportTicketRouter);
 
+// Workspace Customer Support.
+app.use("/api/support", customerSupportRouter);
+app.use("/api/workspaces/:workspaceId/support", customerSupportRouter);
+
 // Platform Dynamic System Settings.
 app.use("/api/platform-admin/settings", platformSettingsRouter);
 app.use("/api/admin/settings", platformSettingsRouter);
@@ -195,6 +208,8 @@ app.use("/api/invitations", invitationRouter);
 // Other application modules.
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/campaigns", campaignRoutes);
+
+
 
 // Root health & status endpoints
 app.get("/", (_req, res) => {

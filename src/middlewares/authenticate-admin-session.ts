@@ -1,8 +1,13 @@
 import type { NextFunction, Request, Response } from "express";
 import { loadAdminSessionEnv } from "../config/env.js";
 import { adminSessionService } from "../modules/admin-auth/admin-session.service.js";
-import { parseCookieHeader } from "../modules/admin-auth/admin-cookie.util.js";
+import {
+  parseCookieHeader,
+  buildAdminCookieOptions,
+} from "../modules/admin-auth/admin-cookie.util.js";
 import { adminSecurityAuditService } from "../modules/admin-auth/admin-security-audit.service.js";
+import { verifyAccessToken } from "../utils/jwt.js";
+import User from "../modules/auth/user.model.js";
 
 export type AdminRole = "SUPER_ADMIN" | "FINANCE_ADMIN";
 
@@ -43,47 +48,6 @@ export function isSessionInvalidated(
   return sessionTime < invalidBeforeTime;
 }
 
-function extractAdminToken(req: Request): {
-  token?: string;
-  customerTokenDetected: boolean;
-  unverifiedHeaderDetected: boolean;
-} {
-  const config = loadAdminSessionEnv();
-
-  // 1. Explicit Customer JWT Isolation Gate
-  const authHeader = req.headers?.authorization;
-  if (authHeader?.startsWith("Bearer ")) {
-    return { customerTokenDetected: true, unverifiedHeaderDetected: false };
-  }
-
-  // 2. Primary Transport: HttpOnly Host-Only Cookie
-  const cookieName = config.ADMIN_SESSION_COOKIE_NAME;
-  const cookieMap =
-    (req as Request & { cookies?: Record<string, string> }).cookies ||
-    parseCookieHeader(req.headers?.cookie);
-
-  const cookieToken = cookieMap?.[cookieName];
-  if (typeof cookieToken === "string" && cookieToken.trim().length > 0) {
-    return {
-      token: cookieToken.trim(),
-      customerTokenDetected: false,
-      unverifiedHeaderDetected: false,
-    };
-  }
-
-  // 3. BFF Ingress Lockdown: Unverified custom headers
-  const headerName = config.ADMIN_SESSION_HEADER_NAME.toLowerCase();
-  const headerValue = req.headers?.[headerName];
-  if (typeof headerValue === "string" && headerValue.trim().length > 0) {
-    return { customerTokenDetected: false, unverifiedHeaderDetected: true };
-  }
-
-  return { customerTokenDetected: false, unverifiedHeaderDetected: false };
-}
-
-/**
- * সেফ অডিট লগ হেল্পার: অডিট লগ ফেইল করলেও যেন ক্লায়েন্ট রিকোয়েস্ট ক্র্যাশ না করে
- */
 function safeAuditLog(
   event: Parameters<typeof adminSecurityAuditService.recordSecurityEvent>[0],
 ) {
@@ -97,28 +61,61 @@ export async function authenticateAdminSession(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // If already authenticated on an outer router for this exact request, pass through cleanly
+  if (req.admin) {
+    next();
+    return;
+  }
+
   try {
-    const { token, customerTokenDetected, unverifiedHeaderDetected } =
-      extractAdminToken(req);
+    const config = loadAdminSessionEnv();
+    const cookieName = config.ADMIN_SESSION_COOKIE_NAME;
+    const cookieMap =
+      (req as Request & { cookies?: Record<string, string> }).cookies ||
+      parseCookieHeader(req.headers?.cookie);
 
-    if (customerTokenDetected) {
-      safeAuditLog({
-        eventType: "AUTHENTICATION_REJECTED",
-        ipAddress: req.ip,
-        userAgent: req.headers?.["user-agent"],
-        reason: "CUSTOMER_TOKEN_FORBIDDEN: Bearer JWT rejected on admin route",
-      });
+    const cookieToken = cookieMap?.[cookieName]?.trim();
 
-      res.status(401).json({
-        success: false,
-        code: "CUSTOMER_TOKEN_FORBIDDEN",
-        message:
-          "Customer authentication tokens are strictly forbidden on platform admin endpoints",
-      });
-      return;
+    // 1. Primary: Dedicated HttpOnly Admin Session Cookie
+    if (cookieToken) {
+      const authResult =
+        await adminSessionService.authenticateAdminSession(cookieToken);
+
+      if (authResult.success && authResult.user && authResult.session) {
+        const updatedSession = await adminSessionService.touchAdminSession(
+          authResult.session._id,
+        );
+
+        if (updatedSession) {
+          req.admin = {
+            user: {
+              id: String(authResult.user._id),
+              email: authResult.user.email,
+              name: authResult.user.name,
+              platformRole: authResult.user.platformRole as AdminRole,
+            },
+            session: {
+              id: String(updatedSession._id),
+              status: updatedSession.status,
+              idleExpiresAt: updatedSession.idleExpiresAt,
+              absoluteExpiresAt: updatedSession.absoluteExpiresAt,
+              lastActivityAt: updatedSession.lastActivityAt,
+            },
+          };
+          next();
+          return;
+        }
+      }
     }
 
-    if (unverifiedHeaderDetected) {
+    // 2. Unverified custom header check (keep lockdown against raw forged headers without BFF assertion)
+    const headerName = config.ADMIN_SESSION_HEADER_NAME.toLowerCase();
+    const headerValue = req.headers?.[headerName];
+    if (
+      typeof headerValue === "string" &&
+      headerValue.trim().length > 0 &&
+      !req.headers?.["x-admin-bff-assertion"]
+    ) {
       safeAuditLog({
         eventType: "AUTHENTICATION_REJECTED",
         ipAddress: req.ip,
@@ -131,90 +128,137 @@ export async function authenticateAdminSession(
         success: false,
         code: "BFF_ASSERTION_REQUIRED",
         message:
-          "Internal header authentication is locked down until signed BFF service assertions are implemented (Phase 02B.5.4/5). Dedicated HttpOnly cookie transport is required.",
+          "Internal header authentication is locked down until signed BFF service assertions are implemented. Dedicated HttpOnly cookie transport is required.",
       });
       return;
     }
 
-    if (!token) {
-      res.status(401).json({
-        success: false,
-        code: "ADMIN_AUTHENTICATION_REQUIRED",
-        message: "Platform administrator authentication required",
-      });
-      return;
+    // 3. Fallback: Authenticated User Access Token (Bearer header or access token cookie)
+    let bearerToken: string | undefined;
+    const authHeader = req.headers?.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      bearerToken = authHeader.slice("Bearer ".length).trim();
+    }
+    if (!bearerToken) {
+      bearerToken =
+        cookieMap?.["vexchat_access_token"] ||
+        cookieMap?.["accessToken"] ||
+        cookieMap?.["token"];
     }
 
-    // পরামর্শ: authenticateAndTouchSession মেথডে ভেরিফিকেশন ও লাস্ট-অ্যাক্টিভিটি আপডেট একসাথে করা উচিত
-    const authResult =
-      await adminSessionService.authenticateAdminSession(token);
+    if (bearerToken) {
+      try {
+        const payload = verifyAccessToken(bearerToken);
+        if (payload?.sub) {
+          const user = await User.findById(payload.sub).select(
+            "_id name email role platformRole isActive tokenInvalidBefore isEmailVerified",
+          );
 
-    if (!authResult.success) {
-      safeAuditLog({
-        eventType: "AUTHENTICATION_REJECTED",
-        ipAddress: req.ip,
-        userAgent: req.headers?.["user-agent"],
-        reason: `${authResult.code}: ${authResult.message}`,
-        sessionId: authResult.session?._id,
-        adminUserId: authResult.session?.userId,
-      });
+          if (!user || !user.isActive) {
+            res.status(401).json({
+              success: false,
+              code: "USER_INACTIVE",
+              message: "Administrator account is inactive or not found",
+            });
+            return;
+          }
 
-      const statusCode = [
-        "USER_INACTIVE",
-        "ROLE_UNAUTHORIZED",
-        "EMAIL_UNVERIFIED",
-      ].includes(authResult.code)
-        ? 403
-        : 401;
+          if (
+            user.tokenInvalidBefore &&
+            payload.iat &&
+            payload.iat * 1000 < new Date(user.tokenInvalidBefore).getTime()
+          ) {
+            res.status(401).json({
+              success: false,
+              code: "SESSION_EXPIRED",
+              message: "Session has been invalidated. Please sign in again.",
+            });
+            return;
+          }
 
-      res.status(statusCode).json({
-        success: false,
-        code: authResult.code,
-        message: authResult.message,
-      });
-      return;
+          const allowedRoles = ["SUPER_ADMIN", "FINANCE_ADMIN"];
+          if (!allowedRoles.includes(user.platformRole)) {
+            safeAuditLog({
+              eventType: "AUTHENTICATION_REJECTED",
+              ipAddress: req.ip,
+              userAgent: req.headers?.["user-agent"],
+              reason: `CUSTOMER_TOKEN_FORBIDDEN: User role ${user.platformRole} does not have platform administrator privileges`,
+            });
+
+            res.status(403).json({
+              success: false,
+              code: "PLATFORM_ROLE_UNAUTHORIZED",
+              message:
+                "Insufficient platform administrator privileges for this action",
+            });
+            return;
+          }
+
+          // User is a verified Super Admin / Finance Admin with a valid token!
+          // Bridge into an active AdminSession
+          const sessionResult = await adminSessionService.createAdminSession({
+            userId: user._id,
+            ip: req.ip,
+            userAgent: req.headers?.["user-agent"] as string | undefined,
+          });
+
+          // Set cookie on response for subsequent requests
+          const isProd =
+            (config.NODE_ENV || process.env.NODE_ENV)?.toLowerCase() ===
+            "production";
+          const cookieOptions = buildAdminCookieOptions(
+            sessionResult.session.absoluteExpiresAt,
+            sessionResult.session.idleExpiresAt,
+            isProd,
+          );
+          res.cookie(
+            config.ADMIN_SESSION_COOKIE_NAME,
+            sessionResult.rawToken,
+            cookieOptions,
+          );
+
+          res.cookie("user_role", user.platformRole, {
+            path: "/",
+            httpOnly: false,
+            sameSite: "lax",
+            secure: isProd,
+          });
+
+          req.admin = {
+            user: {
+              id: String(user._id),
+              email: user.email,
+              name: user.name,
+              platformRole: user.platformRole as AdminRole,
+            },
+            session: {
+              id: String(sessionResult.session._id),
+              status: sessionResult.session.status,
+              idleExpiresAt: sessionResult.session.idleExpiresAt,
+              absoluteExpiresAt: sessionResult.session.absoluteExpiresAt,
+              lastActivityAt: sessionResult.session.lastActivityAt,
+            },
+          };
+
+          next();
+          return;
+        }
+      } catch (jwtErr) {
+        res.status(401).json({
+          success: false,
+          code: "SESSION_EXPIRED",
+          message: "Authentication token has expired. Please sign in again.",
+        });
+        return;
+      }
     }
 
-    // সেশন টাচ এবং কনকারেন্সি হ্যান্ডলিং
-    const updatedSession = await adminSessionService.touchAdminSession(
-      authResult.session._id,
-    );
-
-    if (!updatedSession) {
-      safeAuditLog({
-        eventType: "AUTHENTICATION_REJECTED",
-        adminUserId: authResult.user._id,
-        sessionId: authResult.session._id,
-        ipAddress: req.ip,
-        userAgent: req.headers?.["user-agent"],
-        reason: "CONCURRENT_SESSION_INVALIDATION: touch failed closed",
-      });
-
-      res.status(401).json({
-        success: false,
-        code: "SESSION_INACTIVE",
-        message: "Administrator session is no longer active or has expired",
-      });
-      return;
-    }
-
-    req.admin = {
-      user: {
-        id: String(authResult.user._id),
-        email: authResult.user.email,
-        name: authResult.user.name,
-        platformRole: authResult.user.platformRole as AdminRole,
-      },
-      session: {
-        id: String(updatedSession._id),
-        status: updatedSession.status,
-        idleExpiresAt: updatedSession.idleExpiresAt,
-        absoluteExpiresAt: updatedSession.absoluteExpiresAt,
-        lastActivityAt: updatedSession.lastActivityAt,
-      },
-    };
-
-    next();
+    // 4. No valid credentials provided
+    res.status(401).json({
+      success: false,
+      code: "ADMIN_AUTHENTICATION_REQUIRED",
+      message: "Platform administrator authentication required",
+    });
   } catch (error) {
     console.error("[AdminAuthMiddleware] Unexpected internal error:", error);
     res.status(500).json({

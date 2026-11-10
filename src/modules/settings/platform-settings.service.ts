@@ -2,8 +2,19 @@ import mongoose, { type Types } from "mongoose";
 import PlatformSettings, {
   type IPlatformSettings,
 } from "./platform-settings.model.js";
+import AdminSession from "../admin-auth/admin-session.model.js";
 import { adminSecurityAuditService } from "../admin-auth/admin-security-audit.service.js";
 import type { UpdatePlatformSettingsInput } from "./platform-settings.validation.js";
+
+export interface PlatformRuntimeMetrics {
+  nodeVersion: string;
+  environment: string;
+  uptimeSeconds: number;
+  serverTime: string;
+  mongoConnected: boolean;
+  activeSessionsCount: number;
+  expiredSessionsCount: number;
+}
 
 export interface AdminActorContext {
   adminUserId?: string | Types.ObjectId;
@@ -40,6 +51,44 @@ export class PlatformSettingsService {
   }
 
   /**
+   * Fetch settings along with live server and database runtime diagnostics
+   */
+  public async getSettingsWithRuntime(): Promise<{
+    settings: IPlatformSettings;
+    runtime: PlatformRuntimeMetrics;
+  }> {
+    const settings = await this.getSettings();
+    let activeSessionsCount = 0;
+    let expiredSessionsCount = 0;
+
+    try {
+      if (mongoose.connection.readyState === 1) {
+        [activeSessionsCount, expiredSessionsCount] = await Promise.all([
+          AdminSession.countDocuments({ status: "ACTIVE" }),
+          AdminSession.countDocuments({
+            status: { $in: ["EXPIRED", "REVOKED"] },
+          }),
+        ]);
+      }
+    } catch {
+      // Fallback if database count temporarily unavailable
+    }
+
+    return {
+      settings,
+      runtime: {
+        nodeVersion: process.version,
+        environment: process.env.NODE_ENV || "development",
+        uptimeSeconds: Math.floor(process.uptime()),
+        serverTime: new Date().toISOString(),
+        mongoConnected: mongoose.connection.readyState === 1,
+        activeSessionsCount,
+        expiredSessionsCount,
+      },
+    };
+  }
+
+  /**
    * Upsert system policies & gateway toggles
    */
   public async updateSettings(
@@ -53,6 +102,10 @@ export class PlatformSettingsService {
 
     if (input.currency) {
       settings.currency = input.currency.toUpperCase();
+    }
+
+    if (input.maintenanceMode !== undefined) {
+      settings.maintenanceMode = Boolean(input.maintenanceMode);
     }
 
     if (input.sessionPolicies) {

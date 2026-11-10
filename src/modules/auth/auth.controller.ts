@@ -19,6 +19,7 @@ import {
   changeUserPassword,
 } from "./auth.service.js";
 import type { AuthenticatedRequest } from "../../middlewares/authenticate.js";
+import { adminAuthService } from "../admin-auth/admin-auth.service.js";
 
 export const initiateRegisterController = async (
   req: Request,
@@ -135,6 +136,56 @@ export const loginController = async (
     }
 
     const result = await loginUser(validation.data);
+
+    // If platform admin, automatically establish admin session cookie
+    if (
+      result.user &&
+      (result.user.platformRole === "SUPER_ADMIN" ||
+        result.user.platformRole === "FINANCE_ADMIN")
+    ) {
+      try {
+        const forwarded = req.headers["x-forwarded-for"];
+        const clientIp =
+          typeof forwarded === "string"
+            ? forwarded.split(",")[0].trim()
+            : req.ip || undefined;
+        const userAgent =
+          typeof req.headers["user-agent"] === "string"
+            ? req.headers["user-agent"]
+            : undefined;
+
+        const authResult = await adminAuthService.completeChallengeSession({
+          userId: result.user.id,
+          ipAddress: clientIp,
+          userAgent,
+        });
+
+        if (
+          authResult.success &&
+          authResult.cookieOptions &&
+          authResult.rawToken
+        ) {
+          res.cookie(
+            authResult.cookieOptions.name,
+            authResult.rawToken,
+            authResult.cookieOptions.options,
+          );
+        }
+
+        res.cookie("user_role", result.user.platformRole, {
+          path: "/",
+          httpOnly: false,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+        });
+      } catch (adminErr) {
+        console.error(
+          "[Login] Failed to create admin session for platform admin:",
+          adminErr,
+        );
+      }
+    }
+
     res.status(200).json({
       success: true,
       message: "Login successful",

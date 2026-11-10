@@ -13,6 +13,7 @@ export interface ISupportMessage {
   _id?: Types.ObjectId;
   senderId: Types.ObjectId;
   senderRole: MessageSenderRole;
+  senderName?: string;
   content: string;
   attachments?: ISupportMessageAttachment[];
   createdAt: Date;
@@ -26,6 +27,7 @@ export interface ISupportTicket extends Document {
   customerName: string;
   customerEmail: string;
   subject: string;
+  category?: string;
   priority: TicketPriority;
   status: TicketStatus;
   assignedAdmin: Types.ObjectId | null;
@@ -50,6 +52,7 @@ const supportMessageSchema = new Schema<ISupportMessage>(
       enum: ["CUSTOMER", "PLATFORM_ADMIN"],
       required: true,
     },
+    senderName: { type: String, trim: true },
     content: { type: String, required: true, trim: true },
     attachments: { type: [supportMessageAttachmentSchema], default: [] },
     createdAt: { type: Date, default: Date.now },
@@ -93,6 +96,11 @@ const supportTicketSchema = new Schema<ISupportTicket>(
       type: String,
       required: true,
       trim: true,
+    },
+    category: {
+      type: String,
+      trim: true,
+      default: "Technical Issue",
     },
     priority: {
       type: String,

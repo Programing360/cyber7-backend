@@ -27,6 +27,7 @@ export const gatewayTogglesSchema = z.object({
 
 export const updatePlatformSettingsSchema = z.object({
   currency: z.string().trim().min(3).max(3).toUpperCase().optional(),
+  maintenanceMode: z.boolean().optional(),
   sessionPolicies: sessionPoliciesSchema.optional(),
   gatewayToggles: gatewayTogglesSchema.optional(),
 });
