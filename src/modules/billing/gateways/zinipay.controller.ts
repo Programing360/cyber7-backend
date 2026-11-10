@@ -34,7 +34,10 @@ export async function initiateZinipayPaymentController(
       initiatedBy: userId,
       planCode,
       paymentMethod: "ZINIPAY",
-      ipAddress: req.ip || (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress,
+      ipAddress:
+        req.ip ||
+        (req.headers["x-forwarded-for"] as string) ||
+        req.socket.remoteAddress,
       userAgent: req.headers["user-agent"],
     });
 
@@ -45,7 +48,9 @@ export async function initiateZinipayPaymentController(
       `${req.protocol}://${req.get("host")}`
     ).replace(/\/+$/, "");
 
-    const frontendBase = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/+$/, "");
+    const frontendBase = (
+      process.env.CLIENT_URL || "http://localhost:3000"
+    ).replace(/\/+$/, "");
 
     const redirectUrl =
       process.env.ZINIPAY_SUCCESS_URL ||
@@ -56,6 +61,21 @@ export async function initiateZinipayPaymentController(
       `${frontendBase}/billing?payment_status=cancelled`;
 
     const webhookUrl = `${backendBase}/api/billing/gateways/zinipay/webhook`;
+
+    const payload = {
+      amount: payment.amount,
+      invoiceNumber: payment.invoiceNumber,
+      workspaceId,
+      planCode,
+      userId,
+      userName: req.user?.name,
+      userEmail: req.user?.email,
+      redirectUrl,
+      cancelUrl,
+      webhookUrl,
+    };
+
+    console.log(payload, payment);
 
     // 3. Create checkout session on ZiniPay API
     const session = await zinipayGatewayService.createPaymentSession({
@@ -109,21 +129,23 @@ export async function zinipayCallbackController(
   res: Response,
   _next: NextFunction,
 ): Promise<void> {
-  const frontendUrl = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/+$/, "");
+  const frontendUrl = (
+    process.env.CLIENT_URL || "http://localhost:3000"
+  ).replace(/\/+$/, "");
   const isWebhookOrJson =
     req.headers.accept?.includes("application/json") ||
     (req.method === "POST" && !req.headers["sec-fetch-dest"]);
 
-  const invoiceId = (
-    req.query.invoice_id ||
+  const invoiceId = (req.query.invoice_id ||
     req.body?.invoice_id ||
     req.query.invoiceId ||
     req.body?.invoiceId ||
     req.query.paymentID ||
-    req.body?.paymentID
-  ) as string;
+    req.body?.paymentID) as string;
 
-  const rawStatus = (req.query.status || req.body?.status || "").toString().toLowerCase();
+  const rawStatus = (req.query.status || req.body?.status || "")
+    .toString()
+    .toLowerCase();
 
   try {
     // 1. Explicit cancellation or rejection from user redirect query
@@ -142,7 +164,9 @@ export async function zinipayCallbackController(
       }
 
       if (isWebhookOrJson) {
-        res.status(200).json({ success: true, message: "Payment was marked cancelled" });
+        res
+          .status(200)
+          .json({ success: true, message: "Payment was marked cancelled" });
         return;
       }
       res.redirect(`${frontendUrl}/billing?payment_status=cancelled`);
@@ -159,12 +183,19 @@ export async function zinipayCallbackController(
             ],
             status: "INITIATED",
           },
-          { $set: { status: "FAILED", failureReason: "Payment failed on gateway" } },
+          {
+            $set: {
+              status: "FAILED",
+              failureReason: "Payment failed on gateway",
+            },
+          },
         );
       }
 
       if (isWebhookOrJson) {
-        res.status(200).json({ success: true, message: "Payment was marked failed" });
+        res
+          .status(200)
+          .json({ success: true, message: "Payment was marked failed" });
         return;
       }
       res.redirect(`${frontendUrl}/billing?payment_status=failed`);
@@ -173,10 +204,14 @@ export async function zinipayCallbackController(
 
     if (!invoiceId) {
       if (isWebhookOrJson) {
-        res.status(400).json({ success: false, message: "Missing invoice_id parameter" });
+        res
+          .status(400)
+          .json({ success: false, message: "Missing invoice_id parameter" });
         return;
       }
-      res.redirect(`${frontendUrl}/billing?payment_status=failed&reason=missing_invoice_id`);
+      res.redirect(
+        `${frontendUrl}/billing?payment_status=failed&reason=missing_invoice_id`,
+      );
       return;
     }
 
@@ -194,10 +229,15 @@ export async function zinipayCallbackController(
 
     if (!payment) {
       if (isWebhookOrJson) {
-        res.status(404).json({ success: false, message: "Payment record not found for invoice" });
+        res.status(404).json({
+          success: false,
+          message: "Payment record not found for invoice",
+        });
         return;
       }
-      res.redirect(`${frontendUrl}/billing?payment_status=not_found&invoice_id=${invoiceId}`);
+      res.redirect(
+        `${frontendUrl}/billing?payment_status=not_found&invoice_id=${invoiceId}`,
+      );
       return;
     }
 
@@ -206,7 +246,9 @@ export async function zinipayCallbackController(
       if (payment.status === "COMPLETED") {
         // Idempotent safeguard: already completed
         if (isWebhookOrJson) {
-          res.status(200).json({ success: true, message: "Payment already completed" });
+          res
+            .status(200)
+            .json({ success: true, message: "Payment already completed" });
           return;
         }
         res.redirect(
@@ -231,7 +273,10 @@ export async function zinipayCallbackController(
       });
 
       if (isWebhookOrJson) {
-        res.status(200).json({ success: true, message: "Payment verified and completed successfully" });
+        res.status(200).json({
+          success: true,
+          message: "Payment verified and completed successfully",
+        });
         return;
       }
       res.redirect(
@@ -243,7 +288,9 @@ export async function zinipayCallbackController(
     // 5. Handle PENDING
     if (verified.status === "PENDING") {
       if (isWebhookOrJson) {
-        res.status(200).json({ success: true, message: "Payment is pending verification" });
+        res
+          .status(200)
+          .json({ success: true, message: "Payment is pending verification" });
         return;
       }
       res.redirect(
@@ -258,26 +305,32 @@ export async function zinipayCallbackController(
       {
         $set: {
           status: "FAILED",
-          failureReason: verified.message || "Payment verification reported non-completed status",
+          failureReason:
+            verified.message ||
+            "Payment verification reported non-completed status",
         },
       },
     );
 
     if (isWebhookOrJson) {
-      res.status(400).json({ success: false, message: "Payment verification failed" });
+      res
+        .status(400)
+        .json({ success: false, message: "Payment verification failed" });
       return;
     }
-    res.redirect(`${frontendUrl}/billing?payment_status=failed&reason=verification_failed`);
+    res.redirect(
+      `${frontendUrl}/billing?payment_status=failed&reason=verification_failed`,
+    );
   } catch (err: any) {
     console.error("[ZiniPay Callback/Webhook Error]", err);
     if (isWebhookOrJson) {
       res.status(500).json({
         success: false,
-        message: err?.message || "Internal server error during ZiniPay verification",
+        message:
+          err?.message || "Internal server error during ZiniPay verification",
       });
       return;
     }
     res.redirect(`${frontendUrl}/billing?payment_status=error`);
   }
 }
-

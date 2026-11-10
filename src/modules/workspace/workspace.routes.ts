@@ -22,6 +22,10 @@ import {
   revokeWorkspaceInvitationController,
 } from "./invitation-management/invitation-management.controller.js";
 import { getWorkspaceAnalyticsController } from "../dashboard/dashboard.controller.js";
+import {
+  workspaceSearchController,
+  workspaceNotificationsController,
+} from "./workspace-search.controller.js";
 
 const workspaceRouter = Router();
 
@@ -34,6 +38,19 @@ workspaceRouter.get(
   "/:workspaceId/access-check",
   requireWorkspaceMembership,
   getWorkspaceAccessController,
+);
+
+// Global Workspace Search & Notifications for Dashboard Header
+workspaceRouter.get(
+  "/:workspaceId/search",
+  requireWorkspaceMembership,
+  workspaceSearchController,
+);
+
+workspaceRouter.get(
+  "/:workspaceId/notifications",
+  requireWorkspaceMembership,
+  workspaceNotificationsController,
 );
 
 workspaceRouter.patch(

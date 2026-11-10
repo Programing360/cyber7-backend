@@ -983,6 +983,192 @@ export class BillingService {
       page,
     };
   }
+
+  /**
+   * Retrieves active services, subscription, profile, and unlocked features for a workspace.
+   */
+  async getMyServices(
+    workspaceId: string | Types.ObjectId,
+    userId: string | Types.ObjectId,
+    userRole: string = "USER",
+  ): Promise<{
+    subscription: {
+      planName: string;
+      planCode: string;
+      amount: number;
+      currency: string;
+      status: string;
+      invoiceNumber: string;
+      paymentMethod: string;
+      paymentId: string;
+      startDate: string;
+      expiryDate: string;
+      isPaid: boolean;
+      billingCycle: string;
+      limits: {
+        maxWhatsAppNumbers: number;
+        maxTeamMembers: number;
+      };
+    };
+    userInfo: {
+      name: string;
+      email: string;
+      role: string;
+      subscriptionStatus: string;
+      isPaid: boolean;
+    };
+    unlockedFeatures: {
+      title: string;
+      desc: string;
+      icon: string;
+    }[];
+  }> {
+    const [
+      workspace,
+      user,
+      subscription,
+      latestCompletedPayment,
+      latestAnyPayment,
+      latestPaidInvoice,
+    ] = await Promise.all([
+      Workspace.findById(workspaceId).lean(),
+      User.findById(userId).lean(),
+      subscriptionService.getWorkspaceSubscription(workspaceId),
+      Payment.findOne({ workspaceId, status: "COMPLETED" })
+        .sort({ completedAt: -1, createdAt: -1 })
+        .lean(),
+      Payment.findOne({ workspaceId }).sort({ createdAt: -1 }).lean(),
+      Invoice.findOne({ workspaceId, status: "PAID" })
+        .sort({ paidAt: -1, createdAt: -1 })
+        .lean(),
+    ]);
+
+    if (!workspace) {
+      throw new AppError("Workspace not found", 404);
+    }
+
+    const effectivePayment = latestCompletedPayment || latestAnyPayment;
+
+    // Resolve plan code
+    const rawPlanCode = (
+      subscription?.planCode ||
+      effectivePayment?.planCode ||
+      (user?.subscriptionStatus === "active" ? "BUSINESS_PRO" : "STARTER")
+    ).toUpperCase();
+
+    const planDef =
+      BILLING_PLANS[rawPlanCode] ||
+      BILLING_PLANS.BUSINESS_PRO ||
+      BILLING_PLANS.STARTER;
+
+    // Resolve dates
+    const now = new Date();
+    const startDate = subscription?.currentPeriodStart
+      ? new Date(subscription.currentPeriodStart).toISOString().split("T")[0]
+      : effectivePayment?.completedAt
+        ? new Date(effectivePayment.completedAt).toISOString().split("T")[0]
+        : user?.trialStartDate
+          ? new Date(user.trialStartDate).toISOString().split("T")[0]
+          : now.toISOString().split("T")[0];
+
+    const expiryDate = subscription?.currentPeriodEnd
+      ? new Date(subscription.currentPeriodEnd).toISOString().split("T")[0]
+      : user?.trialEndDate
+        ? new Date(user.trialEndDate).toISOString().split("T")[0]
+        : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .split("T")[0];
+
+    // Determine status
+    let status = "ACTIVE";
+    if (subscription) {
+      status = subscription.status;
+    } else if (user?.isPaid || user?.subscriptionStatus === "active") {
+      status = "ACTIVE";
+    } else if (user?.subscriptionStatus === "trial") {
+      status = "TRIAL";
+    } else if (user?.subscriptionStatus === "expired") {
+      status = "EXPIRED";
+    }
+
+    const invoiceNumber =
+      latestPaidInvoice?.invoiceNumber ||
+      effectivePayment?.invoiceNumber ||
+      `INV-${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}-ACTIVE`;
+
+    const paymentMethod = effectivePayment?.paymentMethod || "ZINIPAY";
+
+    const paymentId =
+      effectivePayment?.gatewayData?.trxID ||
+      effectivePayment?.gatewayData?.paymentID ||
+      effectivePayment?.gatewayData?.zinipayInvoiceId ||
+      effectivePayment?._id?.toString() ||
+      "N/A";
+
+    const amount =
+      effectivePayment?.amount ||
+      subscription?.price ||
+      planDef.priceBdt ||
+      7400;
+
+    const limits = subscription?.limits || planDef.limits || {
+      maxWhatsAppNumbers: 2,
+      maxTeamMembers: 10,
+    };
+
+    const isPaid = Boolean(user?.isPaid || status === "ACTIVE");
+
+    // Dynamic unlocked features
+    const unlockedFeatures = [
+      {
+        title: "WhatsApp Business Cloud API",
+        desc: `${limits.maxWhatsAppNumbers === -1 ? "Unlimited" : limits.maxWhatsAppNumbers} Connected WhatsApp Business Number(s) & Live Chat`,
+        icon: "MessageSquare",
+      },
+      {
+        title: "WebRTC Browser Softphone",
+        desc: "Direct browser-to-browser & phone voice calling capabilities",
+        icon: "Zap",
+      },
+      {
+        title: "Mini-CRM & Multi-Agent Routing",
+        desc: `Up to ${limits.maxTeamMembers === -1 ? "Unlimited" : limits.maxTeamMembers} Team Members with automated lead pipeline`,
+        icon: "Users",
+      },
+      {
+        title: "AI-Driven Campaign Dispatches",
+        desc: "Automated broadcast workflows & smart analytics",
+        icon: "Bot",
+      },
+    ];
+
+    return {
+      subscription: {
+        planName: subscription?.planName || planDef.name,
+        planCode: planDef.code,
+        amount,
+        currency: CURRENCY,
+        status,
+        invoiceNumber,
+        paymentMethod,
+        paymentId,
+        startDate,
+        expiryDate,
+        isPaid,
+        billingCycle: "Monthly",
+        limits,
+      },
+      userInfo: {
+        name: user?.name || user?.displayName || "Workspace Member",
+        email: user?.email || "user@vexchat.app",
+        role: userRole,
+        subscriptionStatus:
+          user?.subscriptionStatus || (status === "ACTIVE" ? "active" : "trial"),
+        isPaid,
+      },
+      unlockedFeatures,
+    };
+  }
 }
 
 export const billingService = new BillingService();

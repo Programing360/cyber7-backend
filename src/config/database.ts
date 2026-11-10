@@ -71,7 +71,7 @@ const connectDatabase = async (): Promise<void> => {
 
   await promise;
 
-  console.log("MongoDB connected successfully");
+  // console.log("MongoDB connected successfully");
 };
 
 export default connectDatabase;

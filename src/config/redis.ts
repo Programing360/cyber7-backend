@@ -27,27 +27,27 @@ export function getRedisConnection(): Redis {
     enableReadyCheck: true,
   });
 
-  connection.on("connect", () => {
-    console.log("[Redis] Connecting");
-  });
+  // connection.on("connect", () => {
+  //   console.log("[Redis] Connecting");
+  // });
 
-  connection.on("ready", () => {
-    console.log("[Redis] Connection ready");
-  });
+  // connection.on("ready", () => {
+  //   console.log("[Redis] Connection ready");
+  // });
 
-  connection.on("close", () => {
-    console.log("[Redis] Connection closed");
-  });
+  // connection.on("close", () => {
+  //   console.log("[Redis] Connection closed");
+  // });
 
-  connection.on("reconnecting", () => {
-    console.log("[Redis] Reconnecting");
-  });
+  // connection.on("reconnecting", () => {
+  //   console.log("[Redis] Reconnecting");
+  // });
 
-  connection.on("end", () => {
-    console.log("[Redis] Connection ended");
-  });
+  // connection.on("end", () => {
+  //   console.log("[Redis] Connection ended");
+  // });
 
-  connection.on("error", logRedisError);
+  // connection.on("error", logRedisError);
 
   redisConnection = connection;
 

@@ -42,7 +42,6 @@ export class ZinipayGatewayService {
 
   private getApiKey(): string {
     const key = (process.env.ZINIPAY_API_KEY || "").trim();
-    console.log("CHECKING ENV KEY:", process.env.ZINIPAY_API_KEY);
     if (!key) {
       throw new AppError(
         "ZiniPay API Key not configured in environment (ZINIPAY_API_KEY is missing)",
@@ -126,7 +125,10 @@ export class ZinipayGatewayService {
       Boolean(data.payment_url || data.url);
 
     const paymentUrl =
-      data.payment_url || data.paymentUrl || data.url || data.data?.payment_url;
+      data.payment_url ||
+      data.paymentUrl ||
+      data.url ||
+      data.data?.payment_url;
 
     if (!response.ok || !isSuccess || !paymentUrl) {
       const errMsg =
@@ -161,10 +163,7 @@ export class ZinipayGatewayService {
     const apiKey = this.getApiKey();
 
     if (!invoiceId || typeof invoiceId !== "string") {
-      throw new AppError(
-        "A valid ZiniPay invoice_id is required for verification",
-        400,
-      );
+      throw new AppError("A valid ZiniPay invoice_id is required for verification", 400);
     }
 
     let response: Response;
@@ -224,10 +223,7 @@ export class ZinipayGatewayService {
       status: normalizedStatus,
       invoice_id: data.invoice_id || invoiceId,
       transaction_id: data.transaction_id || data.trxID || data.txID,
-      amount:
-        typeof data.amount === "number"
-          ? data.amount
-          : Number(data.amount) || undefined,
+      amount: typeof data.amount === "number" ? data.amount : Number(data.amount) || undefined,
       payment_method: data.payment_method || data.paymentMethod || data.method,
       customerName: data.cus_name || data.customerName,
       customerEmail: data.cus_email || data.customerEmail,

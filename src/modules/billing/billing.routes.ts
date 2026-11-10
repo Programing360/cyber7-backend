@@ -11,6 +11,7 @@ import {
   approveBankTransferAdminController,
   getBillingOverviewController,
   getInvoiceController,
+  getMyServicesController,
   initiatePaymentController,
   listInvoicesController,
   listPendingTransfersAdminController,
@@ -33,6 +34,15 @@ export const workspaceBillingRouter = Router({ mergeParams: true });
 
 workspaceBillingRouter.use(authenticate);
 workspaceBillingRouter.use(requireWorkspaceMembership);
+
+// My Services: Accessible to workspace members (OWNER, ADMIN, AGENT)
+workspaceBillingRouter.get(
+  "/my-services",
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getMyServicesController,
+);
+
+// All other billing and financial mutation routes strictly require OWNER or ADMIN
 workspaceBillingRouter.use(requireRole("OWNER", "ADMIN"));
 
 workspaceBillingRouter.get("/overview", getBillingOverviewController);

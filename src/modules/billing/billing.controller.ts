@@ -41,6 +41,36 @@ export const getBillingOverviewController = async (
 };
 
 /**
+ * GET /api/workspaces/:workspaceId/billing/my-services
+ * Returns the active subscription, user profile info, and unlocked features.
+ */
+export const getMyServicesController = async (
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const workspaceId = req.workspace!.id;
+    const userId = req.user!.id;
+    const userRole = (req as any).membership?.role || req.user?.role || "USER";
+
+    const myServices = await billingService.getMyServices(
+      workspaceId,
+      userId,
+      userRole,
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "My services retrieved successfully",
+      data: myServices,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * GET /api/workspaces/:workspaceId/billing/plans
  */
 export const listPlansController = async (

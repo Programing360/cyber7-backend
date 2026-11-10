@@ -24,7 +24,7 @@ export const authenticate = async (
 
     let token: string | undefined;
     const authorization = req.headers.authorization;
-    console.log(authorization);
+    // console.log(authorization);
     if (authorization?.startsWith("Bearer ")) {
       token = authorization.slice("Bearer ".length).trim();
     } else if (typeof req.query?.token === "string" && req.query.token.trim()) {
@@ -43,7 +43,7 @@ export const authenticate = async (
     }
 
     const payload = verifyAccessToken(token);
-    console.log(payload);
+    // console.log(payload);
 
     const user = await User.findById(payload.sub).select(
       "_id name email role platformRole isActive tokenInvalidBefore",
