@@ -75,7 +75,7 @@ export async function initiateZinipayPaymentController(
       webhookUrl,
     };
 
-    console.log(payload, payment);
+    // console.log(payload, payment);
 
     // 3. Create checkout session on ZiniPay API
     const session = await zinipayGatewayService.createPaymentSession({

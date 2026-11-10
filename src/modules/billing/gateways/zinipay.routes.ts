@@ -24,7 +24,7 @@ export const zinipayWorkspaceRouter = Router({ mergeParams: true });
 
 zinipayWorkspaceRouter.use(authenticate);
 zinipayWorkspaceRouter.use(requireWorkspaceMembership);
-zinipayWorkspaceRouter.use(requireRole("USER", "OWNER", "ADMIN"));
+zinipayWorkspaceRouter.use(requireRole("OWNER", "ADMIN"));
 
 zinipayWorkspaceRouter.post("/zinipay", initiateZinipayPaymentController);
 
