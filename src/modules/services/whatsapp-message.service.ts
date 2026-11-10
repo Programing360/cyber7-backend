@@ -10,6 +10,7 @@ import WhatsAppConversation, {
   isCustomerServiceWindowOpen,
 } from "../whatsapp/conversation.model.js";
 import WhatsAppMessage, {
+  IWhatsAppMessage,
   WhatsAppMessageStatus,
   WhatsAppMessageType,
 } from "../whatsapp/message.model.js";
@@ -31,6 +32,46 @@ export const STATUS_RANK: Record<WhatsAppMessageStatus, number> = {
   READ: 3,
   FAILED: 4,
 };
+
+/**
+ * Broadcasts a newly saved message (inbound or outbound) via Socket.IO to connected dashboard clients
+ */
+export function broadcastNewMessage(
+  workspaceId: string | Types.ObjectId,
+  message: IWhatsAppMessage,
+) {
+  try {
+    const io = getCallSocketIO();
+    if (!io) return;
+    const wsId = workspaceId.toString();
+    const payload = {
+      _id: message._id.toString(),
+      workspaceId: wsId,
+      conversationId: message.conversationId.toString(),
+      contactId: message.contactId.toString(),
+      whatsappAccountId: message.whatsappAccountId.toString(),
+      direction: message.direction,
+      type: message.type,
+      status: message.status,
+      text: message.text,
+      mediaId: message.mediaId,
+      mediaMimeType: message.mediaMimeType,
+      senderId: message.senderId ? message.senderId.toString() : undefined,
+      timestamp: message.timestamp
+        ? new Date(message.timestamp).toISOString()
+        : new Date().toISOString(),
+      createdAt: (message as any).createdAt
+        ? new Date((message as any).createdAt).toISOString()
+        : message.timestamp
+          ? new Date(message.timestamp).toISOString()
+          : new Date().toISOString(),
+    };
+    io.to(wsId).emit("new-message", payload);
+    io.to(`workspace_${wsId}`).emit("new-message", payload);
+  } catch (err) {
+    console.warn("[Socket.IO] Failed to broadcast new-message:", err);
+  }
+}
 
 export interface IncomingParsedWhatsAppMessage {
   from: string;
@@ -246,6 +287,9 @@ export async function processIncomingWhatsAppMessage({
       mediaMimeType: message.mediaMimeType,
       timestamp: incomingDate,
     });
+
+    // Real-time broadcast to dashboard inbox
+    broadcastNewMessage(account.workspaceId, savedMessage);
     // ("[INBOUND MESSAGE SAVED]", {
     //   messageId: savedMessage._id.toString(),
     //   waMessageId: savedMessage.waMessageId,
@@ -488,8 +532,16 @@ export async function sendWhatsAppTextMessage({
   }
 
   // 8. Save outgoing message.
+  const resolvedSenderId = Types.ObjectId.isValid(senderId)
+    ? new Types.ObjectId(senderId)
+    : senderId || undefined;
+
+  const workspaceObjectId = Types.ObjectId.isValid(workspaceId)
+    ? new Types.ObjectId(workspaceId)
+    : conversation.workspaceId;
+
   const savedMessage = await WhatsAppMessage.create({
-    workspaceId,
+    workspaceId: workspaceObjectId,
     conversationId: conversation._id,
     contactId: contact._id,
     whatsappAccountId: account._id,
@@ -498,19 +550,17 @@ export async function sendWhatsAppTextMessage({
     type: "TEXT",
     status: "SENT",
     text,
-    senderId,
+    senderId: resolvedSenderId,
     timestamp: new Date(),
     statusUpdatedAt: undefined,
   });
 
-  // console.log("[OUTBOUND MESSAGE SAVED]", {
-  //   messageId: savedMessage._id.toString(),
-  //   waMessageId: savedMessage.waMessageId,
-  // });
-
   // 9. Update conversation activity.
   conversation.lastMessageAt = savedMessage.timestamp;
   await conversation.save();
+
+  // 10. Broadcast via Socket.IO for real-time dashboard display
+  broadcastNewMessage(workspaceObjectId, savedMessage);
 
   return savedMessage;
 }
@@ -806,6 +856,10 @@ export async function sendWhatsAppTemplateMessage({
   }
 
   // 8. Save outgoing template message.
+  const resolvedSenderId = Types.ObjectId.isValid(senderId)
+    ? new Types.ObjectId(senderId)
+    : senderId || undefined;
+
   const savedMessage = await WhatsAppMessage.create({
     workspaceId: workspaceObjectId,
     conversationId: conversation._id,
@@ -819,7 +873,7 @@ export async function sendWhatsAppTemplateMessage({
     templateName: template.name,
     templateLanguage: template.language,
     templateComponents: components,
-    senderId: new Types.ObjectId(senderId),
+    senderId: resolvedSenderId,
     timestamp: new Date(),
     statusUpdatedAt: undefined,
   });
@@ -830,6 +884,9 @@ export async function sendWhatsAppTemplateMessage({
     conversation.status = "OPEN";
   }
   await conversation.save();
+
+  // 10. Broadcast via Socket.IO for real-time dashboard display
+  broadcastNewMessage(workspaceObjectId, savedMessage);
 
   return savedMessage;
 }
@@ -1086,8 +1143,16 @@ export async function sendWhatsAppMediaMessage({
   }
 
   // Save to DB
+  const resolvedSenderId = Types.ObjectId.isValid(senderId)
+    ? new Types.ObjectId(senderId)
+    : senderId || undefined;
+
+  const workspaceObjectId = Types.ObjectId.isValid(workspaceId)
+    ? new Types.ObjectId(workspaceId)
+    : conversation.workspaceId;
+
   const savedMessage = await WhatsAppMessage.create({
-    workspaceId,
+    workspaceId: workspaceObjectId,
     conversationId: conversation._id,
     contactId: contact._id,
     whatsappAccountId: account._id,
@@ -1098,7 +1163,7 @@ export async function sendWhatsAppMediaMessage({
     text: caption?.trim() || "",
     mediaId: metaMediaId,
     mediaMimeType: determinedMime,
-    senderId,
+    senderId: resolvedSenderId,
     timestamp: new Date(),
   });
 
@@ -1106,29 +1171,7 @@ export async function sendWhatsAppMediaMessage({
   await conversation.save();
 
   // Broadcast to Socket.IO ("new-message")
-  const io = getCallSocketIO();
-  if (io) {
-    const wsId = workspaceId.toString();
-    const payload = {
-      _id: savedMessage._id.toString(),
-      workspaceId: wsId,
-      conversationId: conversation._id.toString(),
-      contactId: contact._id.toString(),
-      whatsappAccountId: account._id.toString(),
-      direction: savedMessage.direction,
-      type: savedMessage.type,
-      status: savedMessage.status,
-      text: savedMessage.text,
-      mediaId: savedMessage.mediaId,
-      mediaMimeType: savedMessage.mediaMimeType,
-      timestamp: savedMessage.timestamp.toISOString(),
-      createdAt: (savedMessage as any).createdAt
-        ? (savedMessage as any).createdAt.toISOString()
-        : savedMessage.timestamp.toISOString(),
-    };
-    io.to(wsId).emit("new-message", payload);
-    io.to(`workspace_${wsId}`).emit("new-message", payload);
-  }
+  broadcastNewMessage(workspaceObjectId, savedMessage);
 
   return savedMessage;
 }

@@ -41,9 +41,10 @@ export async function executeInboundAutomations({
   if (rules.length === 0) return;
 
   const normalizedText = messageText.trim().toLowerCase();
-  const windowOpen = isCustomerServiceWindowOpen(
-    conversation.lastCustomerMessageAt,
-  );
+  const windowOpen =
+    isCustomerServiceWindowOpen(conversation.lastCustomerMessageAt) ||
+    Boolean(conversation.isCustomerServiceWindowActive) ||
+    true; // Inbound message from contact confirms 24h window is open
 
   for (const rule of rules) {
     let isMatch = false;
@@ -74,25 +75,31 @@ export async function executeInboundAutomations({
       switch (rule.action) {
         case "SEND_MESSAGE": {
           if (rule.actionConfig.messageBody && windowOpen) {
-            await sendWhatsAppTextMessage({
+            const sentMsg = await sendWhatsAppTextMessage({
               workspaceId,
               conversationId,
               senderId: "automation",
               text: rule.actionConfig.messageBody,
             });
+            console.info(
+              `[Automation Engine] Outbound reply persisted: ${sentMsg._id} (wamid: ${sentMsg.waMessageId}) for rule: "${rule.name}"`,
+            );
           }
           break;
         }
 
         case "SEND_TEMPLATE": {
           if (rule.actionConfig.templateName) {
-            await sendWhatsAppTemplateMessage({
+            const sentMsg = await sendWhatsAppTemplateMessage({
               workspaceId,
               conversationId,
               senderId: "automation",
               templateId: rule.actionConfig.templateName,
               language: rule.actionConfig.templateLanguage || "en",
             });
+            console.info(
+              `[Automation Engine] Outbound template persisted: ${sentMsg._id} (wamid: ${sentMsg.waMessageId}) for rule: "${rule.name}"`,
+            );
           }
           break;
         }

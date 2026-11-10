@@ -10,6 +10,8 @@ export interface IWhatsAppConversation extends Document {
   assignedTo?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
   lastCustomerMessageAt?: Date;
+  isCustomerServiceWindowActive?: boolean;
+  customerServiceWindowExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,6 +53,15 @@ const conversationSchema = new Schema<IWhatsAppConversation>(
     },
 
     lastCustomerMessageAt: {
+      type: Date,
+    },
+
+    isCustomerServiceWindowActive: {
+      type: Boolean,
+      default: true,
+    },
+
+    customerServiceWindowExpiresAt: {
       type: Date,
     },
   },

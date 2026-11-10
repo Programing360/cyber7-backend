@@ -39,7 +39,7 @@ export interface IWhatsAppMessage extends Document {
   templateLanguage?: string;
   templateComponents?: unknown;
 
-  senderId?: mongoose.Types.ObjectId;
+  senderId?: mongoose.Types.ObjectId | string;
   timestamp: Date;
 
   errorMessage?: string;
@@ -145,7 +145,7 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
     },
 
     senderId: {
-      type: Schema.Types.ObjectId,
+      type: Schema.Types.Mixed,
       ref: "User",
     },
 
