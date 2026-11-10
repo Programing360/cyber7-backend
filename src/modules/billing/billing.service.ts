@@ -11,8 +11,13 @@ import {
 } from "./billing.config.js";
 import { invoiceService } from "./invoice.service.js";
 import Invoice from "./invoice.model.js";
-import Payment, { type IBankTransferDetails, type IPayment } from "./payment.model.js";
-import PaymentAuditLog, { type AuditActorType } from "./payment-audit-log.model.js";
+import Payment, {
+  type IBankTransferDetails,
+  type IPayment,
+} from "./payment.model.js";
+import PaymentAuditLog, {
+  type AuditActorType,
+} from "./payment-audit-log.model.js";
 import Subscription, { type ISubscription } from "./subscription.model.js";
 import { subscriptionService } from "./subscription.service.js";
 import { verifyStepUpToken } from "../../utils/jwt.js";
@@ -277,7 +282,9 @@ export class BillingService {
               : {}),
           },
         },
-        session ? { returnDocument: "after", session } : { returnDocument: "after" },
+        session
+          ? { returnDocument: "after", session }
+          : { returnDocument: "after" },
       );
 
       if (!payment) {
@@ -339,6 +346,19 @@ export class BillingService {
       if (!workspace) {
         throw new AppError("Workspace for payment not found", 404);
       }
+      // inside completePaymentAtomic transaction:
+      const workspaceUpdate = Workspace.updateOne(
+        { _id: payment.workspaceId },
+        { $set: { status: "ACTIVE" } },
+      );
+      if (session) workspaceUpdate.session(session);
+
+      const userUpdate = User.updateOne(
+        { _id: payment.initiatedBy },
+        { $set: { isPaid: true, subscriptionStatus: "active" } },
+      );
+      if (session) userUpdate.session(session);
+      await Promise.all([workspaceUpdate, userUpdate]);
 
       // Extend or activate subscription
       const subscription = await subscriptionService.extendSubscriptionPeriod(
@@ -448,8 +468,19 @@ export class BillingService {
     stepUpToken?: string;
     ipAddress?: string;
     userAgent?: string;
-  }): Promise<{ payment: IPayment; subscription: ISubscription; invoice: any }> {
-    const { paymentId, adminUser, adminNotes, stepUpToken, ipAddress, userAgent } = params;
+  }): Promise<{
+    payment: IPayment;
+    subscription: ISubscription;
+    invoice: any;
+  }> {
+    const {
+      paymentId,
+      adminUser,
+      adminNotes,
+      stepUpToken,
+      ipAddress,
+      userAgent,
+    } = params;
 
     const payment = await Payment.findById(paymentId);
     if (!payment) {
@@ -469,7 +500,11 @@ export class BillingService {
 
     // High-Value Guard: >= 50,000 BDT requires a valid step-up authorization token
     if (payment.amount >= 50000) {
-      if (!stepUpToken || typeof stepUpToken !== "string" || stepUpToken.trim().length === 0) {
+      if (
+        !stepUpToken ||
+        typeof stepUpToken !== "string" ||
+        stepUpToken.trim().length === 0
+      ) {
         throw new AppError(
           "High-value transfer (>= ৳50,000 BDT) requires a valid step-up authorization token",
           403,
@@ -498,12 +533,18 @@ export class BillingService {
           $set: {
             status: "COMPLETED",
             completedAt: new Date(),
-            "gatewayData.bankTransfer.verifiedBy": new mongoose.Types.ObjectId(adminUser.id),
+            "gatewayData.bankTransfer.verifiedBy": new mongoose.Types.ObjectId(
+              adminUser.id,
+            ),
             "gatewayData.bankTransfer.verifiedAt": new Date(),
-            ...(adminNotes ? { "gatewayData.bankTransfer.adminNotes": adminNotes.trim() } : {}),
+            ...(adminNotes
+              ? { "gatewayData.bankTransfer.adminNotes": adminNotes.trim() }
+              : {}),
           },
         },
-        session ? { returnDocument: "after", session } : { returnDocument: "after" },
+        session
+          ? { returnDocument: "after", session }
+          : { returnDocument: "after" },
       );
 
       if (!lockedPayment) {
@@ -640,7 +681,8 @@ export class BillingService {
     ipAddress?: string;
     userAgent?: string;
   }): Promise<IPayment> {
-    const { paymentId, adminUser, rejectionReason, ipAddress, userAgent } = params;
+    const { paymentId, adminUser, rejectionReason, ipAddress, userAgent } =
+      params;
 
     if (!rejectionReason || rejectionReason.trim().length === 0) {
       throw new AppError("Rejection reason is required", 400);
@@ -657,11 +699,15 @@ export class BillingService {
           $set: {
             status: "REJECTED",
             "gatewayData.bankTransfer.rejectionReason": rejectionReason.trim(),
-            "gatewayData.bankTransfer.verifiedBy": new mongoose.Types.ObjectId(adminUser.id),
+            "gatewayData.bankTransfer.verifiedBy": new mongoose.Types.ObjectId(
+              adminUser.id,
+            ),
             "gatewayData.bankTransfer.verifiedAt": new Date(),
           },
         },
-        session ? { returnDocument: "after", session } : { returnDocument: "after" },
+        session
+          ? { returnDocument: "after", session }
+          : { returnDocument: "after" },
       );
 
       if (!payment) {
@@ -711,7 +757,8 @@ export class BillingService {
     ipAddress?: string;
     userAgent?: string;
   }): Promise<{ payment: IPayment; subscription?: ISubscription | null }> {
-    const { paymentId, adminUser, reason, refundAmount, ipAddress, userAgent } = params;
+    const { paymentId, adminUser, reason, refundAmount, ipAddress, userAgent } =
+      params;
 
     if (!reason || reason.trim().length === 0) {
       throw new AppError("Refund reason is required", 400);
@@ -762,7 +809,9 @@ export class BillingService {
       let subscription: ISubscription | null = null;
       if (otherCompletedCount === 0) {
         // Revert subscription status
-        const subQuery = Subscription.findOne({ workspaceId: payment.workspaceId });
+        const subQuery = Subscription.findOne({
+          workspaceId: payment.workspaceId,
+        });
         if (session) subQuery.session(session);
         subscription = await subQuery;
 
@@ -828,8 +877,13 @@ export class BillingService {
     ipAddress?: string;
     userAgent?: string;
   }): Promise<IPayment> {
-    const { paymentId, failureReason, actorType = "SYSTEM", ipAddress, userAgent } =
-      params;
+    const {
+      paymentId,
+      failureReason,
+      actorType = "SYSTEM",
+      ipAddress,
+      userAgent,
+    } = params;
 
     const payment = await Payment.findById(paymentId);
     if (!payment) {

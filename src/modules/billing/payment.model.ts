@@ -34,6 +34,8 @@ export interface IGatewayData {
   paymentID?: string;
   cblOrderId?: string;
   cblTransactionId?: string;
+  zinipayInvoiceId?: string;
+  zinipayPaymentUrl?: string;
   bankTransfer?: IBankTransferDetails;
   rawGatewayResponse?: Record<string, any>;
 }
@@ -73,7 +75,7 @@ const paymentSchema = new Schema<IPayment>(
     },
     paymentMethod: {
       type: String,
-      enum: ["BKASH", "CITY_BANK_CARD", "CITY_BANK_TRANSFER"],
+      enum: ["BKASH", "CITY_BANK_CARD", "CITY_BANK_TRANSFER", "ZINIPAY"],
       required: true,
     },
     planCode: {
@@ -126,6 +128,8 @@ const paymentSchema = new Schema<IPayment>(
       paymentID: { type: String, trim: true },
       cblOrderId: { type: String, trim: true },
       cblTransactionId: { type: String, trim: true },
+      zinipayInvoiceId: { type: String, trim: true },
+      zinipayPaymentUrl: { type: String, trim: true },
       bankTransfer: {
         bankName: { type: String, trim: true },
         accountName: { type: String, trim: true },
@@ -179,6 +183,14 @@ paymentSchema.index(
 paymentSchema.index(
   { "gatewayData.cblOrderId": 1 },
   { unique: true, sparse: true },
+);
+paymentSchema.index(
+  { "gatewayData.zinipayInvoiceId": 1 },
+  { unique: true, sparse: true },
+);
+paymentSchema.index(
+  { "gatewayData.paymentID": 1 },
+  { sparse: true },
 );
 
 const Payment = mongoose.model<IPayment>("Payment", paymentSchema);

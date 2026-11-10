@@ -45,6 +45,8 @@ import { authenticate } from "./middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "./middlewares/require-workspace-membership.js";
 import { requireRole } from "./middlewares/require-role.js";
 import automationRoutes from "./router/automation.routes.js";
+import bikashRouter from "./modules/billing/gateways/bikash.router.js";
+import { zinipayPublicRouter } from "./modules/billing/gateways/zinipay.routes.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -160,7 +162,6 @@ app.use("/api", internalCronRouter);
 // Workspace and billing.
 app.use("/api/workspaces", workspaceRouter);
 
-
 // Workspace WhatsApp Media and Messaging Routes (drop-in aliases for frontend convenience)
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/media/:mediaId",
@@ -183,6 +184,10 @@ app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
 app.use("/api/admin/billing", platformAdminBillingRouter);
 app.use("/api/platform-admin/billing", platformAdminBillingRouter);
+
+// Payment Gateways (bKash & ZiniPay)
+app.use("/api/billing/gateways", bikashRouter);
+app.use("/api/billing/gateways", zinipayPublicRouter);
 
 // Platform administrator.
 app.use("/api/platform-admin/auth", adminAuthRouter);
@@ -208,8 +213,6 @@ app.use("/api/invitations", invitationRouter);
 // Other application modules.
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/campaigns", campaignRoutes);
-
-
 
 // Root health & status endpoints
 app.get("/", (_req, res) => {

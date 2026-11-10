@@ -22,6 +22,7 @@ import {
 import { subscriptionLifecycleController } from "./subscription-lifecycle.controller.js";
 import { documentController } from "./document.controller.js";
 import { probePaymentGatewaysHealth } from "./gateway-probe.service.js";
+import { initiateZinipayPaymentController } from "./gateways/zinipay.controller.js";
 
 /**
  * Workspace Billing Router
@@ -37,6 +38,7 @@ workspaceBillingRouter.use(requireRole("OWNER", "ADMIN"));
 workspaceBillingRouter.get("/overview", getBillingOverviewController);
 workspaceBillingRouter.get("/plans", listPlansController);
 workspaceBillingRouter.post("/payments/initiate", initiatePaymentController);
+workspaceBillingRouter.post("/pay/zinipay", initiateZinipayPaymentController);
 workspaceBillingRouter.post(
   "/payments/:paymentId/bank-transfer",
   submitBankTransferController,

@@ -89,6 +89,7 @@ export const PAYMENT_METHODS = [
   "BKASH",
   "CITY_BANK_CARD",
   "CITY_BANK_TRANSFER",
+  "ZINIPAY",
 ] as const;
 
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
