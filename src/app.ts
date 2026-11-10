@@ -142,6 +142,10 @@ if (process.env.NODE_ENV !== "production") {
 // Authenticated Socket.IO calling/signaling.
 initCallSocket(io);
 
+// Payment Gateways (bKash & ZiniPay)
+app.use("/api/billing/gateways", bikashRouter);
+app.use("/api/billing/gateways", zinipayPublicRouter);
+
 // ========================================================
 // 1. PUBLIC WEBHOOKS (সবার উপরে রাখতে হবে)
 // ========================================================
@@ -184,10 +188,6 @@ app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
 app.use("/api/admin/billing", platformAdminBillingRouter);
 app.use("/api/platform-admin/billing", platformAdminBillingRouter);
-
-// Payment Gateways (bKash & ZiniPay)
-app.use("/api/billing/gateways", bikashRouter);
-app.use("/api/billing/gateways", zinipayPublicRouter);
 
 // Platform administrator.
 app.use("/api/platform-admin/auth", adminAuthRouter);

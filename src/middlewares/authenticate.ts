@@ -20,7 +20,7 @@ export const authenticate = async (
 ): Promise<void> => {
   try {
 
-    console.log('click');
+    // console.log('click');
 
     let token: string | undefined;
     const authorization = req.headers.authorization;

@@ -2,7 +2,7 @@ import type { Response, NextFunction } from "express";
 
 import type { WorkspaceRequest } from "./require-workspace-membership.js";
 
-type WorkspaceRole = "OWNER" | "ADMIN" | "AGENT";
+type WorkspaceRole = "USER" | "OWNER" | "ADMIN" | "AGENT";
 
 export const requireRole = (...allowedRoles: WorkspaceRole[]) => {
   return (req: WorkspaceRequest, res: Response, next: NextFunction): void => {

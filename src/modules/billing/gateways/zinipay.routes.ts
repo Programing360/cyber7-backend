@@ -13,8 +13,8 @@ import {
  */
 export const zinipayPublicRouter = Router();
 
-zinipayPublicRouter.all("/zinipay/callback", zinipayCallbackController);
-zinipayPublicRouter.all("/zinipay/webhook", zinipayCallbackController);
+zinipayPublicRouter.post("/zinipay/webhook", zinipayCallbackController);
+zinipayPublicRouter.get("/zinipay/callback", zinipayCallbackController);
 
 /**
  * Workspace Authenticated ZiniPay Initiation Router
@@ -24,9 +24,8 @@ export const zinipayWorkspaceRouter = Router({ mergeParams: true });
 
 zinipayWorkspaceRouter.use(authenticate);
 zinipayWorkspaceRouter.use(requireWorkspaceMembership);
-zinipayWorkspaceRouter.use(requireRole("OWNER", "ADMIN"));
+zinipayWorkspaceRouter.use(requireRole("USER", "OWNER", "ADMIN"));
 
 zinipayWorkspaceRouter.post("/zinipay", initiateZinipayPaymentController);
 
 export default zinipayPublicRouter;
-

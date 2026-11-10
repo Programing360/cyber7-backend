@@ -8,7 +8,7 @@ import type { AuthenticatedRequest } from "./authenticate.js";
 export interface WorkspaceRequest extends AuthenticatedRequest {
   workspace?: {
     id: string;
-    role: "OWNER" | "ADMIN" | "AGENT";
+    role: "USER" |"OWNER" | "ADMIN" | "AGENT";
     membershipId: string;
   };
 }
