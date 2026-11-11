@@ -12,8 +12,6 @@ const startServer = async (): Promise<void> => {
     await connectDatabase();
 
     server.listen(PORT, () => {
-      console.log(`VexChat server running at http://localhost:${PORT}`);
-      console.log(`Health check: http://localhost:${PORT}/api/health`);
     });
   } catch (error) {
     console.error("Failed to start VexChat server:", error);

@@ -27,7 +27,6 @@ export const initiateRegisterController = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    console.log(req.body);
     const validation = initiateRegisterSchema.safeParse(req.body);
     if (!validation.success) {
       res.status(400).json({

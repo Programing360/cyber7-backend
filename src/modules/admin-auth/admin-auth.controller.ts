@@ -362,7 +362,6 @@ export class AdminAuthController {
     next: NextFunction,
   ): Promise<void> => {
     try {
-      console.log(req.admin);
 
       if (!req.admin?.user || !req.admin?.session) {
         res.status(401).json({

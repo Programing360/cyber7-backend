@@ -49,13 +49,13 @@ export const getCallLogs = async (
   res: Response,
 ): Promise<Response> => {
   try {
-    console.log("🔥 Webhook hit:", req.body);
+    
     const workspaceId =
       req.workspace?.id ??
       (typeof req.params.workspaceId === "string"
         ? req.params.workspaceId
         : undefined);
-    console.log(workspaceId);
+  
     if (!workspaceId || !mongoose.Types.ObjectId.isValid(workspaceId)) {
       return res.status(403).json({
         success: false,
@@ -184,7 +184,7 @@ export const startOutgoingCall = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
-  console.log("🔥 Webhook hit:", req.body, "2");
+ 
   try {
     const workspaceId =
       req.workspace?.id ??
@@ -380,7 +380,7 @@ export const endCallSession = async (
   req: WorkspaceRequest,
   res: Response,
 ): Promise<Response> => {
-  console.log("🔥 Webhook hit:", req.body, "3");
+
   try {
     const workspaceId =
       req.workspace?.id ??

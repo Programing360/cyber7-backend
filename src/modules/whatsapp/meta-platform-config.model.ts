@@ -50,7 +50,7 @@ export default MetaPlatformConfig;
 export async function recordWebhookVerificationSuccess(
   ip?: string,
 ): Promise<void> {
-  console.log("Recording webhook verification success:", { ip });
+
   await MetaPlatformConfig.findOneAndUpdate(
     { key: "webhook_verification" },
     {

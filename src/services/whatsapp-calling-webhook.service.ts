@@ -204,11 +204,6 @@ export async function acceptMetaCallWithSdp(
         },
       },
     );
-    console.log("[META ACCEPT RESPONSE]", {
-      status: response.status,
-      data: response.data,
-      callId,
-    });
 
     logEvent("Meta call accepted successfully via Graph API", { callId });
     return response.status === 200;
@@ -971,7 +966,7 @@ async function processCallStatus(
   const timestamp = parseMetaDate(statusEvent.timestamp) ?? new Date();
   const wsId = workspaceId.toString();
   const io = getCallSocketIO();
-  console.log(status, "callId", callId);
+
   if (status === "RINGING") {
     const recipient = normalizeString(statusEvent.recipient_id);
 
@@ -1120,17 +1115,6 @@ export async function processWhatsAppCallingWebhook(
 ): Promise<void> {
   const phoneNumberId = normalizeString(value.metadata?.phone_number_id);
 
-  console.log("\n========================================================");
-  console.log("📥 [Calling Webhook] Webhook Received!");
-  console.log("📱 [Calling Webhook] Phone Number ID:", phoneNumberId);
-  console.log(
-    "📦 [Calling Webhook] Calls Array Length:",
-    value.calls?.length || 0,
-  );
-  console.log(
-    "📊 [Calling Webhook] Statuses Array Length:",
-    value.statuses?.length || 0,
-  );
 
   if (!phoneNumberId) {
     logInvalidEvent("Missing metadata.phone_number_id");
@@ -1147,21 +1131,14 @@ export async function processWhatsAppCallingWebhook(
     return;
   }
 
-  console.log(
-    "🏢 [Calling Webhook] Resolved Workspace ID:",
-    account.workspaceId.toString(),
-  );
 
   const contacts = value.contacts ?? [];
 
   for (const event of value.calls ?? []) {
     const eventName = normalizeString(event.event)?.toLowerCase();
-    console.log(
-      `🔍 [Calling Webhook] Processing event: "${eventName}" | Call ID: ${event.id} | Direction: ${event.direction}`,
-    );
+ 
 
     if (eventName === "connect") {
-      console.log("🚀 [Calling Webhook] ROUTING TO => processConnectEvent()");
       await processConnectEvent(
         account.workspaceId,
         event,
@@ -1172,7 +1149,7 @@ export async function processWhatsAppCallingWebhook(
     }
 
     if (eventName === "terminate") {
-      console.log("🛑 [Calling Webhook] ROUTING TO => processTerminateEvent()");
+     
       await processTerminateEvent(
         account.workspaceId,
         event,
@@ -1192,5 +1169,5 @@ export async function processWhatsAppCallingWebhook(
   for (const statusEvent of value.statuses ?? []) {
     await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
   }
-  console.log("========================================================\n");
+ 
 }
