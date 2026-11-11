@@ -90,14 +90,28 @@ export async function createCallEndMessage(
     });
 
     if (!conversation) {
-      const account = await WhatsAppAccount.findOne({
-        workspaceId: call.workspaceId,
-        status: "CONNECTED",
-      });
+      let account = null;
+      if (call.phoneNumberId) {
+        account = await WhatsAppAccount.findOne({
+          phoneNumberId: call.phoneNumberId,
+          workspaceId: call.workspaceId,
+        });
+      }
+      if (!account) {
+        account = await WhatsAppAccount.findOne({
+          workspaceId: call.workspaceId,
+          status: "CONNECTED",
+        });
+      }
+      if (!account) {
+        account = await WhatsAppAccount.findOne({
+          workspaceId: call.workspaceId,
+        });
+      }
 
       if (!account) {
         console.warn(
-          "[CallMessageService] No connected WhatsAppAccount found for workspace:",
+          "[CallMessageService] No WhatsAppAccount found for workspace:",
           call.workspaceId,
         );
         return;
@@ -120,12 +134,17 @@ export async function createCallEndMessage(
       call.callType === "MISSED" ||
       call.status === "MISSED" ||
       call.status === "REJECTED" ||
+      call.status === "CANCELLED" ||
       (call.durationSeconds ?? 0) <= 0;
 
     let text: string;
+    const msgType = isMissed ? "missed_call" : "voice_call";
+
     if (isMissed) {
       if (call.status === "REJECTED") {
         text = "Declined voice call";
+      } else if (call.status === "CANCELLED") {
+        text = "Cancelled voice call";
       } else if (call.callType === "OUTGOING") {
         text = "Unanswered voice call";
       } else {
@@ -142,7 +161,7 @@ export async function createCallEndMessage(
       contactId: contact._id,
       whatsappAccountId: conversation.whatsappAccountId,
       direction,
-      type: "CALL",
+      type: msgType,
       status: "DELIVERED",
       text,
       callLogId: call._id,
@@ -162,7 +181,6 @@ export async function createCallEndMessage(
     await conversation.save();
 
     // 6. Broadcast via Socket.IO ("new-message")
-    // 🔥 ফিক্স: ফ্রন্টএন্ডের সাথে মিলিয়ে ফ্ল্যাট অবজেক্ট পাঠানো
     const io = getCallSocketIO();
     if (io) {
       const wsId = call.workspaceId.toString();
@@ -173,7 +191,7 @@ export async function createCallEndMessage(
         contactId: contact._id.toString(),
         whatsappAccountId: conversation.whatsappAccountId.toString(),
         direction: message.direction,
-        type: "CALL" as const,
+        type: message.type,
         status: "DELIVERED",
         text: message.text,
         callLogId: call._id.toString(),
@@ -186,7 +204,7 @@ export async function createCallEndMessage(
       io.to(wsId).emit("new-message" as any, flatPayload);
       io.to(`workspace_${wsId}`).emit("new-message" as any, flatPayload);
       console.info(
-        `[CallMessageService] Broadcasted call end message to workspace ${wsId}`,
+        `[CallMessageService] Broadcasted call log message (${msgType}) to workspace ${wsId}`,
       );
     }
   } catch (error) {

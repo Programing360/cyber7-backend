@@ -221,12 +221,16 @@ whatsappRoutes.post(
   sendWhatsAppMediaMessageController,
 );
 
-// Media Streaming Proxy Route (Images / Videos stream directly from Meta Cloud CDN)
+// Media Streaming Proxy Route (Audio / Images / Videos stream directly from Meta Cloud CDN)
+whatsappRoutes.get(
+  "/media/:mediaId",
+  authenticate,
+  getWhatsAppMediaStreamController,
+);
+
 whatsappRoutes.get(
   "/:workspaceId/media/:mediaId",
   authenticate,
-  requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN", "AGENT"),
   getWhatsAppMediaStreamController,
 );
 

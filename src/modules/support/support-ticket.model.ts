@@ -1,7 +1,12 @@
 import mongoose, { Schema, type Document, type Types } from "mongoose";
 
 export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
-export type TicketStatus = "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+export type TicketStatus =
+  | "OPEN"
+  | "IN_PROGRESS"
+  | "WAITING_ON_CUSTOMER"
+  | "RESOLVED"
+  | "CLOSED";
 export type MessageSenderRole = "CUSTOMER" | "PLATFORM_ADMIN";
 
 export interface ISupportMessageAttachment {
@@ -110,7 +115,13 @@ const supportTicketSchema = new Schema<ISupportTicket>(
     },
     status: {
       type: String,
-      enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"],
+      enum: [
+        "OPEN",
+        "IN_PROGRESS",
+        "WAITING_ON_CUSTOMER",
+        "RESOLVED",
+        "CLOSED",
+      ],
       default: "OPEN",
       index: true,
     },

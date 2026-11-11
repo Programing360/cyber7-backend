@@ -73,6 +73,11 @@ router.get(
   requireAdminPlatformRole("SUPER_ADMIN", "FINANCE_ADMIN"),
   (req, res, next) => platformAdminDashboardController.listPayments(req, res, next),
 );
+router.get(
+  "/billing/payments",
+  requireAdminPlatformRole("SUPER_ADMIN", "FINANCE_ADMIN"),
+  (req, res, next) => platformAdminDashboardController.listPayments(req, res, next),
+);
 
 // Invoices list (SUPER_ADMIN and FINANCE_ADMIN)
 router.get(

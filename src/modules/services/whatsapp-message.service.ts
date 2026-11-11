@@ -900,38 +900,95 @@ export async function getWhatsAppMediaStream({
   workspaceId,
   mediaId,
 }: {
-  workspaceId: string;
+  workspaceId?: string;
   mediaId: string;
 }): Promise<{
   stream: NodeJS.ReadableStream;
   contentType: string;
   contentLength?: number;
 }> {
-  if (!Types.ObjectId.isValid(workspaceId)) {
-    throw new AppError("Invalid workspace ID", 400);
-  }
   if (!mediaId || typeof mediaId !== "string") {
     throw new AppError("Media ID is required", 400);
   }
 
-  // 1. Find connected WhatsApp account
-  const account = await WhatsAppAccount.findOne({
-    workspaceId: new Types.ObjectId(workspaceId),
-    status: "CONNECTED",
-  }).select("+accessTokenEncrypted");
+  // 1. Resolve WhatsApp account and token
+  let token: string | undefined;
 
-  if (!account || !account.accessTokenEncrypted) {
-    throw new AppError(
-      "No active WhatsApp account connected for this workspace",
-      404,
-    );
+  // Try finding account by workspaceId if provided
+  if (workspaceId && Types.ObjectId.isValid(workspaceId)) {
+    const account = await WhatsAppAccount.findOne({
+      workspaceId: new Types.ObjectId(workspaceId),
+      status: "CONNECTED",
+    }).select("+accessTokenEncrypted");
+
+    if (account?.accessTokenEncrypted) {
+      try {
+        token = decrypt(account.accessTokenEncrypted);
+      } catch {
+        // Fallback to other resolution strategies
+      }
+    }
   }
 
-  let token: string;
-  try {
-    token = decrypt(account.accessTokenEncrypted);
-  } catch {
-    throw new AppError("Failed to decrypt WhatsApp account credentials", 500);
+  // If token not resolved yet, look up WhatsAppMessage by mediaId
+  if (!token) {
+    const message = await WhatsAppMessage.findOne({ mediaId });
+    if (message) {
+      if (message.whatsappAccountId) {
+        const account = await WhatsAppAccount.findById(
+          message.whatsappAccountId,
+        ).select("+accessTokenEncrypted");
+        if (account?.accessTokenEncrypted) {
+          try {
+            token = decrypt(account.accessTokenEncrypted);
+          } catch {
+            // continue
+          }
+        }
+      }
+      if (!token && message.workspaceId) {
+        const account = await WhatsAppAccount.findOne({
+          workspaceId: message.workspaceId,
+          status: "CONNECTED",
+        }).select("+accessTokenEncrypted");
+        if (account?.accessTokenEncrypted) {
+          try {
+            token = decrypt(account.accessTokenEncrypted);
+          } catch {
+            // continue
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback to any connected WhatsAppAccount in DB
+  if (!token) {
+    const anyAccount = await WhatsAppAccount.findOne({
+      status: "CONNECTED",
+    }).select("+accessTokenEncrypted");
+    if (anyAccount?.accessTokenEncrypted) {
+      try {
+        token = decrypt(anyAccount.accessTokenEncrypted);
+      } catch {
+        // continue
+      }
+    }
+  }
+
+  // Fallback to environment variable
+  if (!token) {
+    token =
+      process.env.META_ACCESS_TOKEN ||
+      process.env.WHATSAPP_ACCESS_TOKEN ||
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN;
+  }
+
+  if (!token) {
+    throw new AppError(
+      "No active WhatsApp account credentials found to retrieve media",
+      404,
+    );
   }
 
   // 2. Fetch media URL from Meta Graph API: GET https://graph.facebook.com/v21.0/{media_id}
@@ -963,9 +1020,12 @@ export async function getWhatsAppMediaStream({
     timeout: 30000,
   });
 
+  const contentType =
+    mimeType === "audio/ogg" ? "audio/ogg; codecs=opus" : mimeType;
+
   return {
     stream: mediaStreamRes.data,
-    contentType: mimeType,
+    contentType,
     contentLength: typeof fileSize === "number" ? fileSize : undefined,
   };
 }

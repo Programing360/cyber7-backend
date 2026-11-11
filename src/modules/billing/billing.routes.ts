@@ -24,6 +24,7 @@ import { subscriptionLifecycleController } from "./subscription-lifecycle.contro
 import { documentController } from "./document.controller.js";
 import { probePaymentGatewaysHealth } from "./gateway-probe.service.js";
 import { initiateZinipayPaymentController } from "./gateways/zinipay.controller.js";
+import { platformAdminDashboardController } from "../platform-admin-dashboard/dashboard.controller.js";
 
 /**
  * Workspace Billing Router
@@ -90,6 +91,13 @@ platformAdminBillingRouter.post(
   "/bank-transfers/:paymentId/reject",
   requireAdminPlatformRole("SUPER_ADMIN", "FINANCE_ADMIN"),
   rejectBankTransferAdminController,
+);
+
+// Payments list (SUPER_ADMIN and FINANCE_ADMIN)
+platformAdminBillingRouter.get(
+  "/payments",
+  requireAdminPlatformRole("SUPER_ADMIN", "FINANCE_ADMIN"),
+  (req, res, next) => platformAdminDashboardController.listPayments(req, res, next),
 );
 
 // Refund completed payment (SUPER_ADMIN and FINANCE_ADMIN)

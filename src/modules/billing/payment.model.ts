@@ -195,4 +195,5 @@ paymentSchema.index(
 
 const Payment = mongoose.model<IPayment>("Payment", paymentSchema);
 
+export const PaymentModel = Payment;
 export default Payment;

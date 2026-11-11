@@ -4,6 +4,7 @@ export const ticketPriorityEnum = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
 export const ticketStatusEnum = z.enum([
   "OPEN",
   "IN_PROGRESS",
+  "WAITING_ON_CUSTOMER",
   "RESOLVED",
   "CLOSED",
 ]);
@@ -43,11 +44,27 @@ export const updateTicketPrioritySchema = z.object({
 });
 
 export const assignTicketSchema = z.object({
-  assignedAdminId: z
-    .string()
-    .trim()
-    .regex(/^[0-9a-fA-F]{24}$/, "Invalid admin ID format")
-    .nullable(),
+  assignedAdminId: z.preprocess(
+    (val) => {
+      if (
+        val === "" ||
+        val === undefined ||
+        val === null ||
+        val === "null" ||
+        val === "undefined"
+      ) {
+        return null;
+      }
+      return typeof val === "string" ? val.trim() : val;
+    },
+    z
+      .union([
+        z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid assigned admin ID format"),
+        z.string().email("Invalid admin email format"),
+      ])
+      .nullable()
+      .optional(),
+  ),
 });
 
 export const addTicketMessageSchema = z.object({

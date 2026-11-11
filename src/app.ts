@@ -165,12 +165,15 @@ app.use("/api", internalCronRouter);
 // Workspace and billing.
 app.use("/api/workspaces", workspaceRouter);
 
-// Workspace WhatsApp Media and Messaging Routes (drop-in aliases for frontend convenience)
+// WhatsApp Media Streaming Proxy Routes (Direct and Workspace-scoped)
+app.get(
+  "/api/whatsapp/media/:mediaId",
+  authenticate,
+  getWhatsAppMediaStreamController,
+);
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/media/:mediaId",
   authenticate,
-  requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN", "AGENT"),
   getWhatsAppMediaStreamController,
 );
 app.post(

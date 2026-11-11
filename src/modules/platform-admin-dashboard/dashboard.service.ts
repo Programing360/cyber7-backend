@@ -2,7 +2,7 @@ import type { Types } from "mongoose";
 import Workspace from "../workspace/workspace.model.js";
 import User from "../auth/user.model.js";
 import Subscription from "../billing/subscription.model.js";
-import Payment from "../billing/payment.model.js";
+import Payment, { PaymentModel } from "../billing/payment.model.js";
 import Invoice from "../billing/invoice.model.js";
 import AdminSecurityAuditLog from "../admin-auth/admin-security-audit.model.js";
 import type { PlanCode } from "../billing/billing.config.js";
@@ -627,36 +627,184 @@ export class PlatformAdminDashboardService {
     }
     if (params.search && params.search.trim()) {
       const q = params.search.trim();
-      filter.$or = [
+      const [matchingWorkspaces, matchingUsers] = await Promise.all([
+        Workspace.find({ name: { $regex: q, $options: "i" } })
+          .select("_id")
+          .lean()
+          .exec(),
+        User.find({
+          $or: [
+            { name: { $regex: q, $options: "i" } },
+            { email: { $regex: q, $options: "i" } },
+          ],
+        })
+          .select("_id")
+          .lean()
+          .exec(),
+      ]);
+
+      const wsIds = matchingWorkspaces.map((w) => w._id);
+      const userIds = matchingUsers.map((u) => u._id);
+
+      const orConditions: Array<Record<string, unknown>> = [
         { invoiceNumber: { $regex: q, $options: "i" } },
         { "gatewayData.trxID": { $regex: q, $options: "i" } },
       ];
+
+      if (wsIds.length > 0) {
+        orConditions.push({ workspaceId: { $in: wsIds } });
+      }
+      if (userIds.length > 0) {
+        orConditions.push({ initiatedBy: { $in: userIds } });
+      }
+
+      filter.$or = orConditions;
     }
 
     const [payments, total] = await Promise.all([
-      Payment.find(filter)
+      PaymentModel.find(filter)
         .select("-gatewayData.rawGatewayResponse")
-        .populate("workspaceId", "name slug")
-        .populate("initiatedBy", "name email")
+        .populate("workspaceId", "name")
+        .populate("initiatedBy", "name email phoneNumber")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean()
         .exec(),
-      Payment.countDocuments(filter).exec(),
+      PaymentModel.countDocuments(filter).exec(),
     ]);
 
+    // Handle any unpopulated or missing workspace/user IDs
+    const missingWsIds: any[] = [];
+    const missingUserIds: any[] = [];
+
+    for (const p of payments as any[]) {
+      if (p.workspaceId && typeof p.workspaceId !== "object") {
+        missingWsIds.push(p.workspaceId);
+      }
+      if (p.initiatedBy && typeof p.initiatedBy !== "object") {
+        missingUserIds.push(p.initiatedBy);
+      }
+    }
+
+    let fallbackWsMap = new Map<string, any>();
+    let fallbackUserMap = new Map<string, any>();
+
+    if (missingWsIds.length > 0) {
+      const wsDocs = await Workspace.find({ _id: { $in: missingWsIds } })
+        .select("name")
+        .lean()
+        .exec();
+      fallbackWsMap = new Map(wsDocs.map((w) => [String(w._id), w]));
+    }
+
+    if (missingUserIds.length > 0) {
+      const userDocs = await User.find({ _id: { $in: missingUserIds } })
+        .select("name email phoneNumber")
+        .lean()
+        .exec();
+      fallbackUserMap = new Map(userDocs.map((u) => [String(u._id), u]));
+    }
+
     const items = payments.map((p: any) => {
-      const workspace = p.workspaceId || {};
-      const initiator = p.initiatedBy || {};
+      // 1. Resolve Workspace
+      let wsObj: any = null;
+      let wsIdStr = "";
+      let wsName = "";
+
+      if (
+        p.workspaceId &&
+        typeof p.workspaceId === "object" &&
+        ("_id" in p.workspaceId || "name" in p.workspaceId)
+      ) {
+        wsObj = p.workspaceId;
+        wsIdStr = String(wsObj._id || "");
+        wsName = wsObj.name || "";
+      } else if (p.workspaceId) {
+        wsIdStr = String(p.workspaceId);
+        const fallback = fallbackWsMap.get(wsIdStr);
+        if (fallback) {
+          wsObj = fallback;
+          wsName = fallback.name || "";
+        }
+      }
+
+      if (!wsName && p.workspaceName) {
+        wsName = p.workspaceName;
+      }
+      if (!wsName && wsIdStr) {
+        wsName = `Workspace (${wsIdStr.slice(-6)})`;
+      }
+      if (!wsName) {
+        wsName = "Unknown Workspace";
+      }
+
+      // 2. Resolve Initiator / Customer
+      let userObj: any = null;
+      let userIdStr = "";
+      let userName = "";
+      let userEmail = "";
+      let userPhone = "";
+
+      if (
+        p.initiatedBy &&
+        typeof p.initiatedBy === "object" &&
+        ("_id" in p.initiatedBy ||
+          "email" in p.initiatedBy ||
+          "name" in p.initiatedBy)
+      ) {
+        userObj = p.initiatedBy;
+        userIdStr = String(userObj._id || "");
+        userName = userObj.name || "";
+        userEmail = userObj.email || "";
+        userPhone = userObj.phoneNumber || "";
+      } else if (p.initiatedBy) {
+        userIdStr = String(p.initiatedBy);
+        const fallback = fallbackUserMap.get(userIdStr);
+        if (fallback) {
+          userObj = fallback;
+          userName = fallback.name || "";
+          userEmail = fallback.email || "";
+          userPhone = fallback.phoneNumber || "";
+        }
+      }
+
+      if (!userName && p.customerName) userName = p.customerName;
+      if (!userEmail && p.customerEmail) userEmail = p.customerEmail;
+      if (!userPhone && (p.customerPhone || p.customerPhoneNumber)) {
+        userPhone = p.customerPhone || p.customerPhoneNumber;
+      }
+      if (!userName && userEmail) {
+        userName = userEmail.split("@")[0];
+      }
+      if (!userName && userIdStr) {
+        userName = `User (${userIdStr.slice(-6)})`;
+      }
+      if (!userName) userName = "Unknown Customer";
+      if (!userEmail) userEmail = "Unknown";
+
       return {
         id: String(p._id),
-        workspaceId: String(workspace._id || ""),
-        workspaceName: workspace.name || "Unknown",
+        workspaceId: wsObj
+          ? {
+              _id: wsIdStr,
+              id: wsIdStr,
+              name: wsName,
+            }
+          : wsIdStr,
+        workspaceName: wsName,
         initiatedBy: {
-          id: String(initiator._id || ""),
-          name: initiator.name || "Unknown",
-          email: initiator.email || "Unknown",
+          id: userIdStr,
+          _id: userIdStr,
+          name: userName,
+          email: userEmail,
+          phoneNumber: userPhone || undefined,
+        },
+        customer: {
+          id: userIdStr,
+          name: userName,
+          email: userEmail,
+          phoneNumber: userPhone || undefined,
         },
         paymentMethod: p.paymentMethod,
         planCode: p.planCode,
@@ -673,8 +821,11 @@ export class PlatformAdminDashboardService {
           bankTransfer: p.gatewayData?.bankTransfer,
         },
         failureReason: p.failureReason,
-        completedAt: p.completedAt ? new Date(p.completedAt).toISOString() : undefined,
-        createdAt: p.createdAt?.toISOString?.() || new Date(p.createdAt).toISOString(),
+        completedAt: p.completedAt
+          ? new Date(p.completedAt).toISOString()
+          : undefined,
+        createdAt:
+          p.createdAt?.toISOString?.() || new Date(p.createdAt).toISOString(),
       };
     });
 

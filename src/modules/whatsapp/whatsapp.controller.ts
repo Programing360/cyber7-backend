@@ -451,12 +451,13 @@ export async function getWhatsAppMediaStreamController(
   next: NextFunction,
 ) {
   try {
-    const workspaceId = req.workspace?.id ?? (req.params.workspaceId as string);
+    const workspaceId =
+      req.workspace?.id ??
+      (req.params.workspaceId as string | undefined) ??
+      (req.query.workspaceId as string | undefined) ??
+      (req.headers["x-workspace-id"] as string | undefined);
     const mediaId = req.params.mediaId as string;
 
-    if (!workspaceId) {
-      throw new AppError("Workspace ID is required", 400);
-    }
     if (!mediaId) {
       throw new AppError("Media ID is required", 400);
     }
@@ -467,10 +468,26 @@ export async function getWhatsAppMediaStreamController(
     });
 
     res.setHeader("Content-Type", contentType);
+    res.setHeader("Accept-Ranges", "bytes");
     if (contentLength) {
       res.setHeader("Content-Length", contentLength);
     }
     res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+
+    // Guard against client disconnecting or stream piping failures
+    (stream as any).on("error", (err: any) => {
+      if (!res.headersSent) {
+        next(err);
+      } else {
+        res.end();
+      }
+    });
+
+    res.on("close", () => {
+      if ((stream as any).destroy) {
+        (stream as any).destroy();
+      }
+    });
 
     (stream as NodeJS.ReadableStream).pipe(res);
   } catch (error) {

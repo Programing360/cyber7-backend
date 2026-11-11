@@ -12,6 +12,7 @@ import {
 } from "../modules/Calling/callNotificationOutbox.service.js";
 import { getCallSocketIO } from "../sockets/callSocket.js";
 import { decrypt } from "../utils/encryption.js";
+import { createCallEndMessage } from "../modules/services/call-message.service.js";
 
 type CallDirection = "USER_INITIATED" | "BUSINESS_INITIATED";
 type CallType = "INCOMING" | "OUTGOING" | "MISSED";
@@ -792,6 +793,17 @@ async function processConnectEvent(
           callId,
           assignedTo,
         });
+
+        io.to(`user_${assignedTo}`).emit("call:accepted" as any, {
+          workspaceId: wsId,
+          callId,
+          assignedTo,
+        });
+
+        await updateNonTerminalCall(workspaceId, callId, {
+          status: "CONNECTED",
+          answeredAt: new Date(),
+        });
       }
     }
   }
@@ -940,6 +952,9 @@ async function processTerminateEvent(
     );
   }
 
+  // Create chat history message bubble & notify inbox
+  await createCallEndMessage(callLogId);
+
   logEvent("Terminate event processed", {
     callType,
     status: isRejected ? "REJECTED" : "ENDED",
@@ -994,6 +1009,7 @@ async function processCallStatus(
   if (status === "ACCEPTED") {
     await updateNonTerminalCall(workspaceId, callId, {
       status: "CONNECTED",
+      answeredAt: new Date(),
     });
 
     const call = await CallLog.findOne({
@@ -1007,6 +1023,11 @@ async function processCallStatus(
       const io = getCallSocketIO();
 
       io?.to(`user_${call.assignedTo.toString()}`).emit("call-accepted", {
+        workspaceId: wsId,
+        callId,
+        assignedTo: call.assignedTo.toString(),
+      });
+      io?.to(`user_${call.assignedTo.toString()}`).emit("call:accepted" as any, {
         workspaceId: wsId,
         callId,
         assignedTo: call.assignedTo.toString(),
@@ -1028,8 +1049,12 @@ async function processCallStatus(
       workspaceId,
       providerCallId: callId,
     })
-      .select("assignedTo")
+      .select("_id assignedTo")
       .lean();
+
+    if (call?._id) {
+      await createCallEndMessage(call._id);
+    }
 
     if (call?.assignedTo) {
       const io = getCallSocketIO();
@@ -1115,7 +1140,6 @@ export async function processWhatsAppCallingWebhook(
 ): Promise<void> {
   const phoneNumberId = normalizeString(value.metadata?.phone_number_id);
 
-
   if (!phoneNumberId) {
     logInvalidEvent("Missing metadata.phone_number_id");
     return;
@@ -1131,12 +1155,10 @@ export async function processWhatsAppCallingWebhook(
     return;
   }
 
-
   const contacts = value.contacts ?? [];
 
   for (const event of value.calls ?? []) {
     const eventName = normalizeString(event.event)?.toLowerCase();
- 
 
     if (eventName === "connect") {
       await processConnectEvent(
@@ -1149,7 +1171,6 @@ export async function processWhatsAppCallingWebhook(
     }
 
     if (eventName === "terminate") {
-     
       await processTerminateEvent(
         account.workspaceId,
         event,
@@ -1169,5 +1190,4 @@ export async function processWhatsAppCallingWebhook(
   for (const statusEvent of value.statuses ?? []) {
     await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
   }
- 
 }

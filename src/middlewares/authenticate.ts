@@ -29,8 +29,17 @@ export const authenticate = async (
       token = authorization.slice("Bearer ".length).trim();
     } else if (typeof req.query?.token === "string" && req.query.token.trim()) {
       token = req.query.token.trim();
-    } else if (req.cookies && (req.cookies.accessToken || req.cookies.token)) {
-      token = (req.cookies.accessToken || req.cookies.token) as string;
+    } else if (
+      req.cookies &&
+      (req.cookies.accessToken ||
+        req.cookies.token ||
+        req.cookies.vexchat_access_token ||
+        req.cookies.cyber7_access_token)
+    ) {
+      token = (req.cookies.accessToken ||
+        req.cookies.token ||
+        req.cookies.vexchat_access_token ||
+        req.cookies.cyber7_access_token) as string;
     }
 
     if (!token) {

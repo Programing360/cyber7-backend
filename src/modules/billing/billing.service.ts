@@ -969,7 +969,7 @@ export class BillingService {
     const [transfers, total] = await Promise.all([
       Payment.find(query)
         .populate("workspaceId", "name slug")
-        .populate("initiatedBy", "name email")
+        .populate("initiatedBy", "name email phoneNumber")
         .sort({ createdAt: 1 })
         .skip(skip)
         .limit(limit)

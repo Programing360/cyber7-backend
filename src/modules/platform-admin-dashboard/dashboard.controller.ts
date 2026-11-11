@@ -1,5 +1,6 @@
 import type { NextFunction, Response } from "express";
 import { platformAdminDashboardService } from "./dashboard.service.js";
+import { PaymentModel } from "../billing/payment.model.js";
 import type { AdminAuthenticatedRequest } from "../../middlewares/authenticate-admin-session.js";
 
 export class PlatformAdminDashboardController {
@@ -210,3 +211,4 @@ export class PlatformAdminDashboardController {
 }
 
 export const platformAdminDashboardController = new PlatformAdminDashboardController();
+export { PaymentModel };

@@ -6,6 +6,7 @@ import CallLog from "../Calling/CallLog.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 import { decrypt } from "../../utils/encryption.js";
+import { createCallEndMessage } from "../services/call-message.service.js";
 
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -504,10 +505,18 @@ export const endCallSession = async (
       }
     }
 
-    call.status = status === "REJECTED" ? "REJECTED" : "ENDED";
+    call.status =
+      status === "REJECTED"
+        ? "REJECTED"
+        : status === "CANCELLED"
+          ? "CANCELLED"
+          : "ENDED";
     call.endedAt = now;
     call.durationSeconds = finalDuration;
     await call.save();
+
+    // Automatically generate and broadcast chat call log bubble
+    await createCallEndMessage(call._id);
 
     return res.status(200).json({
       success: true,

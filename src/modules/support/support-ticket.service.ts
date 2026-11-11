@@ -159,8 +159,23 @@ export class SupportTicketService {
       urgent: urgentTotal,
     };
 
+    const mappedItems = items.map((doc: any) => ({
+      ...doc,
+      id: doc._id?.toString() || doc.ticketNumber,
+      assignedAdminId:
+        doc.assignedAdmin && typeof doc.assignedAdmin === "object"
+          ? doc.assignedAdmin._id?.toString() || doc.assignedAdmin.id?.toString() || null
+          : doc.assignedAdmin
+            ? String(doc.assignedAdmin)
+            : null,
+      assignedAdmin:
+        doc.assignedAdmin && typeof doc.assignedAdmin === "object"
+          ? doc.assignedAdmin.name || doc.assignedAdmin.email || null
+          : doc.assignedAdmin || null,
+    }));
+
     return {
-      items: items as unknown as ISupportTicket[],
+      items: mappedItems as unknown as ISupportTicket[],
       total,
       page,
       pageSize,
@@ -238,22 +253,54 @@ export class SupportTicketService {
     assignedAdminId: string | null,
     actor: AdminActorContext,
   ): Promise<ISupportTicket> {
-    let query: Record<string, unknown> = { ticketNumber: ticketId };
-    if (mongoose.Types.ObjectId.isValid(ticketId)) {
-      query = { $or: [{ _id: ticketId }, { ticketNumber: ticketId }] };
+    const cleanTicketId = String(ticketId || "").trim();
+    let query: Record<string, unknown> = { ticketNumber: cleanTicketId };
+    if (mongoose.Types.ObjectId.isValid(cleanTicketId)) {
+      query = {
+        $or: [
+          { _id: new mongoose.Types.ObjectId(cleanTicketId) },
+          { ticketNumber: cleanTicketId },
+        ],
+      };
     }
 
     const ticket = await SupportTicket.findOne(query);
     if (!ticket) {
-      throw new Error(`Support ticket '${ticketId}' not found.`);
+      throw new Error(`Support ticket '${cleanTicketId}' not found.`);
     }
 
-    if (assignedAdminId) {
-      const adminUser = await User.findById(assignedAdminId);
-      if (!adminUser) {
-        throw new Error(`Admin user '${assignedAdminId}' not found.`);
+    if (assignedAdminId && String(assignedAdminId).trim()) {
+      const cleanAdminId = String(assignedAdminId).trim();
+      let adminUser: any = null;
+
+      if (mongoose.Types.ObjectId.isValid(cleanAdminId)) {
+        adminUser = await User.findById(cleanAdminId);
       }
-      ticket.assignedAdmin = new mongoose.Types.ObjectId(assignedAdminId);
+      if (!adminUser) {
+        adminUser = await User.findOne({
+          email: cleanAdminId.toLowerCase(),
+        });
+      }
+      if (!adminUser) {
+        const nameMatches = await User.find({
+          name: {
+            $regex: new RegExp(
+              `^${cleanAdminId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i",
+            ),
+          },
+          platformRole: { $in: ["SUPER_ADMIN", "FINANCE_ADMIN"] },
+        });
+        if (nameMatches.length === 1) {
+          adminUser = nameMatches[0];
+        }
+      }
+      if (!adminUser) {
+        throw new Error(
+          `Admin user '${cleanAdminId}' not found. Please provide a valid admin ID, email, or select an active administrator.`,
+        );
+      }
+      ticket.assignedAdmin = adminUser._id as Types.ObjectId;
     } else {
       ticket.assignedAdmin = null;
     }
@@ -275,6 +322,9 @@ export class SupportTicketService {
       },
     });
 
+    if (typeof (ticket as any).populate === "function") {
+      await (ticket as any).populate("assignedAdmin", "name email platformRole");
+    }
     return ticket;
   }
 
@@ -286,14 +336,20 @@ export class SupportTicketService {
     status: TicketStatus,
     actor: AdminActorContext,
   ): Promise<ISupportTicket> {
-    let query: Record<string, unknown> = { ticketNumber: ticketId };
-    if (mongoose.Types.ObjectId.isValid(ticketId)) {
-      query = { $or: [{ _id: ticketId }, { ticketNumber: ticketId }] };
+    const cleanTicketId = String(ticketId || "").trim();
+    let query: Record<string, unknown> = { ticketNumber: cleanTicketId };
+    if (mongoose.Types.ObjectId.isValid(cleanTicketId)) {
+      query = {
+        $or: [
+          { _id: new mongoose.Types.ObjectId(cleanTicketId) },
+          { ticketNumber: cleanTicketId },
+        ],
+      };
     }
 
     const ticket = await SupportTicket.findOne(query);
     if (!ticket) {
-      throw new Error(`Support ticket '${ticketId}' not found.`);
+      throw new Error(`Support ticket '${cleanTicketId}' not found.`);
     }
 
     const previousStatus = ticket.status;
@@ -316,6 +372,9 @@ export class SupportTicketService {
       },
     });
 
+    if (typeof (ticket as any).populate === "function") {
+      await (ticket as any).populate("assignedAdmin", "name email platformRole");
+    }
     return ticket;
   }
 
@@ -327,14 +386,20 @@ export class SupportTicketService {
     input: AddTicketMessageInput,
     actor: AdminActorContext,
   ): Promise<ISupportTicket> {
-    let query: Record<string, unknown> = { ticketNumber: ticketId };
-    if (mongoose.Types.ObjectId.isValid(ticketId)) {
-      query = { $or: [{ _id: ticketId }, { ticketNumber: ticketId }] };
+    const cleanTicketId = String(ticketId || "").trim();
+    let query: Record<string, unknown> = { ticketNumber: cleanTicketId };
+    if (mongoose.Types.ObjectId.isValid(cleanTicketId)) {
+      query = {
+        $or: [
+          { _id: new mongoose.Types.ObjectId(cleanTicketId) },
+          { ticketNumber: cleanTicketId },
+        ],
+      };
     }
 
     const ticket = await SupportTicket.findOne(query);
     if (!ticket) {
-      throw new Error(`Support ticket '${ticketId}' not found.`);
+      throw new Error(`Support ticket '${cleanTicketId}' not found.`);
     }
 
     const senderId = actor.adminUserId
@@ -371,6 +436,9 @@ export class SupportTicketService {
       },
     });
 
+    if (typeof (ticket as any).populate === "function") {
+      await (ticket as any).populate("assignedAdmin", "name email platformRole");
+    }
     return ticket;
   }
 

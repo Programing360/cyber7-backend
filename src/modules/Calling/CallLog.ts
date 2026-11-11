@@ -27,6 +27,7 @@ export type CallStatus =
   | "ENDED"
   | "REJECTED"
   | "MISSED"
+  | "CANCELLED"
   | "FAILED";
 
 export type CallAssignmentSource = "ASSIGNED_AGENT" | "OWNER_ADMIN_FALLBACK";
@@ -114,6 +115,7 @@ const callLogSchema = new Schema<ICallLog>(
         "ENDED",
         "REJECTED",
         "MISSED",
+        "CANCELLED",
         "FAILED",
       ],
       default: "RINGING",

@@ -12,6 +12,8 @@ export type WhatsAppMessageType =
   | "TEMPLATE"
   | "INTERACTIVE"
   | "CALL"
+  | "voice_call"
+  | "missed_call"
   | "UNKNOWN";
 
 export type WhatsAppMessageStatus =
@@ -100,6 +102,8 @@ const whatsappMessageSchema = new Schema<IWhatsAppMessage>(
         "TEMPLATE",
         "INTERACTIVE",
         "CALL",
+        "voice_call",
+        "missed_call",
         "UNKNOWN",
       ],
       required: true,
