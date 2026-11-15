@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import {
   connectWhatsAppController,
+  completeEmbeddedSignupController,
   updateWhatsAppStatusController,
   disconnectWhatsAppController,
   getWhatsAppAccountsController,
@@ -24,6 +25,7 @@ import {
   updateConversationStatusController,
   listConversationMessagesController,
   createConversationController,
+  markConversationAsReadController,
 } from "./whatsapp-chat.controller.js";
 
 import {
@@ -84,6 +86,23 @@ whatsappRoutes.post(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN"),
   connectWhatsAppController,
+);
+
+// WhatsApp Cloud API Embedded Signup Completion
+whatsappRoutes.post(
+  "/embedded-signup/complete",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  completeEmbeddedSignupController,
+);
+
+whatsappRoutes.post(
+  "/:workspaceId/embedded-signup/complete",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN"),
+  completeEmbeddedSignupController,
 );
 
 whatsappRoutes.get(
@@ -191,7 +210,15 @@ whatsappRoutes.get(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   listConversationMessagesController,
-  createConversationController,
+);
+
+// Mark Conversation As Read Route (Read Receipts / Double Blue Ticks)
+whatsappRoutes.post(
+  "/:workspaceId/conversations/:conversationId/read",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  markConversationAsReadController,
 );
 
 // Outbound Message Route

@@ -87,6 +87,7 @@ const TERMINAL_STATUSES: CallStatus[] = [
   "ENDED",
   "REJECTED",
   "MISSED",
+  "CANCELLED",
   "FAILED",
 ];
 
@@ -857,21 +858,34 @@ async function processTerminateEvent(
 
   const isRejected = metaStatus === "REJECTED";
 
+  const isAnswered =
+    (duration !== undefined && duration > 0) ||
+    existingCall?.status === "CONNECTED" ||
+    Boolean((existingCall as any)?.answeredAt) ||
+    (metaStatus === "COMPLETED" && (duration === undefined || duration > 0));
+
   const isUnanswered =
-    direction === "USER_INITIATED" &&
+    !isAnswered &&
+    !isRejected &&
     (metaStatus === "NO_ANSWER" ||
       metaStatus === "CANCELED" ||
       metaStatus === "CANCELLED" ||
       event.reason === "timeout" ||
-      (metaStatus === "COMPLETED" && duration === undefined));
+      duration === 0 ||
+      duration === undefined);
 
-  const callType: CallType = isUnanswered ? "MISSED" : getCallType(direction);
+  const callType: CallType =
+    direction === "USER_INITIATED" && isUnanswered
+      ? "MISSED"
+      : getCallType(direction);
 
-  const endStatus: "MISSED" | "REJECTED" | "ENDED" = isUnanswered
-    ? "MISSED"
-    : isRejected
-      ? "REJECTED"
-      : "ENDED";
+  const endStatus: "MISSED" | "REJECTED" | "ENDED" | "CANCELLED" = isRejected
+    ? "REJECTED"
+    : isAnswered
+      ? "ENDED"
+      : metaStatus === "CANCELED" || metaStatus === "CANCELLED"
+        ? "CANCELLED"
+        : "MISSED";
 
   const endedAt =
     parseMetaDate(event.end_time) ??
@@ -896,17 +910,27 @@ async function processTerminateEvent(
 
   const { callLogId } = await ensureCallLog(workspaceId, identity);
 
+  const calculatedDuration =
+    duration !== undefined
+      ? duration
+      : isAnswered && existingCall?.startedAt
+        ? Math.max(
+            1,
+            Math.round(
+              (endedAt.getTime() - new Date(existingCall.startedAt).getTime()) /
+                1000,
+            ),
+          )
+        : 0;
+
   const update: Record<string, unknown> = {
-    status: endStatus,
+    status: endStatus === "CANCELLED" ? "CANCELLED" : endStatus,
     endedAt,
     callType,
     callerName,
     phoneNumber: resolvedPhoneNumber,
+    durationSeconds: calculatedDuration,
   };
-
-  if (duration !== undefined) {
-    update.durationSeconds = duration;
-  }
 
   await CallLog.updateOne(
     {
@@ -935,7 +959,7 @@ async function processTerminateEvent(
       payload: {
         workspaceId: wsId,
         callId,
-        endStatus,
+        endStatus: endStatus === "CANCELLED" ? "MISSED" : endStatus,
       },
     });
   } else if (existingCall?.assignedTo) {
@@ -952,8 +976,11 @@ async function processTerminateEvent(
     );
   }
 
-  // Create chat history message bubble & notify inbox
-  await createCallEndMessage(callLogId);
+  // Create or update chat history message bubble & notify inbox
+  await createCallEndMessage(callLogId, {
+    forceCompleted: isAnswered,
+    durationSeconds: calculatedDuration,
+  });
 
   logEvent("Terminate event processed", {
     callType,

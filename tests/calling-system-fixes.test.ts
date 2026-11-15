@@ -217,6 +217,93 @@ describe("WebRTC WhatsApp Calling & Chat System Fixes Test Suite", () => {
         WhatsAppMessage.findOne = originalMessageFindOne;
       }
     });
+
+    it("should update existing message in-place instead of creating duplicate when message already exists", async () => {
+      const activeCallId = new mongoose.Types.ObjectId();
+      const mockCall = {
+        _id: activeCallId,
+        providerCallId: "wacid-test-provider-999",
+        workspaceId,
+        phoneNumber: testPhone,
+        callType: "OUTGOING",
+        status: "ENDED",
+        durationSeconds: 8,
+      };
+
+      const existingMessageDoc: any = {
+        _id: new mongoose.Types.ObjectId(),
+        callLogId: activeCallId,
+        workspaceId,
+        conversationId,
+        contactId,
+        whatsappAccountId: accountId,
+        direction: "OUTBOUND",
+        type: "missed_call",
+        text: "Cancelled voice call",
+        status: "DELIVERED",
+        timestamp: new Date(),
+        save: async function () {
+          return this;
+        },
+      };
+
+      const originalCallFindById = CallLog.findById;
+      const originalContactFindOne = WhatsAppContact.findOne;
+      const originalAccountFindOne = WhatsAppAccount.findOne;
+      const originalConvFindOne = WhatsAppConversation.findOne;
+      const originalMessageCreate = WhatsAppMessage.create;
+      const originalMessageFindOne = WhatsAppMessage.findOne;
+
+      let createCalled = false;
+
+      try {
+        CallLog.findById = (() => Promise.resolve(mockCall)) as any;
+        WhatsAppMessage.findOne = (() => Promise.resolve(existingMessageDoc)) as any;
+        WhatsAppContact.findOne = (() =>
+          Promise.resolve({
+            _id: contactId,
+            workspaceId,
+            phoneNumber: testPhone,
+          })) as any;
+        WhatsAppAccount.findOne = (() =>
+          Promise.resolve({
+            _id: accountId,
+            workspaceId,
+            status: "CONNECTED",
+          })) as any;
+        WhatsAppConversation.findOne = (() =>
+          Promise.resolve({
+            _id: conversationId,
+            workspaceId,
+            contactId,
+            whatsappAccountId: accountId,
+            lastMessageAt: new Date(),
+            save: async () => {},
+          })) as any;
+
+        WhatsAppMessage.create = (() => {
+          createCalled = true;
+          return Promise.resolve(existingMessageDoc);
+        }) as any;
+
+        await createCallEndMessage(activeCallId, {
+          forceCompleted: true,
+          durationSeconds: 8,
+        });
+
+        assert.equal(createCalled, false, "Should not call create() when message exists");
+        assert.equal(existingMessageDoc.type, "voice_call");
+        assert.equal(existingMessageDoc.text, "Voice call • 00:08");
+        assert.equal(existingMessageDoc.waMessageId, "wacid-test-provider-999");
+      } finally {
+        CallLog.findById = originalCallFindById;
+        WhatsAppContact.findOne = originalContactFindOne;
+        WhatsAppAccount.findOne = originalAccountFindOne;
+        WhatsAppConversation.findOne = originalConvFindOne;
+        WhatsAppMessage.create = originalMessageCreate;
+        WhatsAppMessage.findOne = originalMessageFindOne;
+      }
+    });
   });
 
   describe("Issue 5: WhatsApp Voice Message & Media Proxy Infrastructure", () => {

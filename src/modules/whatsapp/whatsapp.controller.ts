@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import type { WorkspaceRequest } from "../../middlewares/require-workspace-membership.js";
 import {
   connectWhatsAppAccount,
+  completeEmbeddedSignup,
   listWhatsAppAccounts,
   getWhatsAppAccount,
   updateWhatsAppAccountStatus,
@@ -12,6 +13,7 @@ import {
 } from "./whatsapp.service.js";
 import {
   connectWhatsAppSchema,
+  embeddedSignupCompleteSchema,
   sendWhatsAppTextMessageSchema,
   sendWhatsAppTemplateMessageSchema,
   updateWhatsAppStatusSchema,
@@ -52,6 +54,54 @@ export async function connectWhatsAppController(
     res.status(201).json({
       success: true,
       message: "WhatsApp account registered successfully",
+      data: account,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ─── POST /embedded-signup/complete ──────────────────────────────────────────
+
+export async function completeEmbeddedSignupController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId =
+      req.workspace?.id ||
+      (typeof req.params.workspaceId === "string"
+        ? req.params.workspaceId
+        : undefined) ||
+      (typeof req.body?.workspaceId === "string"
+        ? req.body.workspaceId
+        : undefined);
+
+    if (!workspaceId) {
+      throw new AppError("A valid workspace context is required", 400);
+    }
+
+    const parsedInput = embeddedSignupCompleteSchema.safeParse(req.body);
+
+    if (!parsedInput.success) {
+      throw new AppError(
+        parsedInput.error.issues[0]?.message ?? "Invalid request payload",
+        400,
+      );
+    }
+
+    const account = await completeEmbeddedSignup({
+      workspaceId,
+      code: parsedInput.data.code,
+      wabaId: parsedInput.data.wabaId,
+      phoneNumberId: parsedInput.data.phoneNumberId,
+    });
+
+    res.status(200).json({
+      success: true,
+      message:
+        "WhatsApp Business Account connected successfully via Embedded Signup",
       data: account,
     });
   } catch (error) {

@@ -14,6 +14,7 @@ import { updateCampaignRecipientStatusFromWebhook } from "../campaign/campaign.s
 
 import type { WhatsAppMessageType } from "../whatsapp/message.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
+import CallLog from "../Calling/CallLog.js";
 import { processWhatsAppCallingWebhook } from "../../services/whatsapp-calling-webhook.service.js";
 import { executeInboundAutomations } from "../whatsapp/automation-engine.service.js";
 
@@ -90,6 +91,81 @@ function extractMediaMimeType(message: WebhookMessage): string | undefined {
     message.sticker;
 
   return mediaPayload?.mime_type;
+}
+
+/**
+ * Identify if an incoming message is a call, system, or call-related interactive event
+ * that should not be inserted as a dummy/interactive text message.
+ */
+async function isCallRelatedOrSystemMessage(
+  message: WebhookMessage,
+  trackedCallIds: Set<string>,
+): Promise<boolean> {
+  const msgType = (message.type || "").toLowerCase();
+
+  // 1. Explicit call or system types
+  if (
+    msgType === "call" ||
+    msgType === "system" ||
+    msgType === "voice_call" ||
+    msgType === "missed_call"
+  ) {
+    return true;
+  }
+
+  // 2. Call ID or call attribute on root message or referral
+  const callId =
+    (message as any).call_id ||
+    (message as any).call?.id ||
+    (message as any).referral?.call_id ||
+    (message.interactive as any)?.call_id ||
+    (message.interactive as any)?.call?.id;
+
+  if (callId) {
+    return true;
+  }
+
+  // 3. If message.id or any field matches tracked call IDs in the webhook payload
+  if (
+    trackedCallIds.has(message.id) ||
+    (callId && trackedCallIds.has(String(callId)))
+  ) {
+    return true;
+  }
+
+  // 4. Interactive message with calling type or missing standard button/list reply
+  if (msgType === "interactive") {
+    const interactive = message.interactive;
+    const interactiveType = ((interactive?.type as string) || "").toLowerCase();
+
+    // Call-related interactive types
+    if (
+      interactiveType === "call" ||
+      interactiveType === "voice_call" ||
+      interactiveType === "call_permission" ||
+      interactiveType === "system"
+    ) {
+      return true;
+    }
+
+    // Standard interactive messages MUST have button_reply or list_reply
+    // If neither exists, it is a Meta internal call/system prompt, not a user message
+    if (!interactive?.button_reply && !interactive?.list_reply) {
+      return true;
+    }
+  }
+
+  // 5. Database lookup: Check if message.id matches an existing CallLog providerCallId
+  if (message.id) {
+    const existingCall = await CallLog.exists({
+      providerCallId: message.id,
+    });
+    if (existingCall) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // ---------- Webhook payload types ----------
@@ -379,8 +455,27 @@ export async function receiveWhatsAppWebhook(
         }
 
         // 5. Process incoming WhatsApp messages.
+        const trackedCallIds = new Set<string>();
+        if (Array.isArray((value as any)?.calls)) {
+          for (const c of (value as any).calls) {
+            if (c?.id) trackedCallIds.add(String(c.id));
+          }
+        }
+        if (Array.isArray((value as any)?.statuses)) {
+          for (const s of (value as any).statuses) {
+            if (s?.id && s?.type === "call") trackedCallIds.add(String(s.id));
+          }
+        }
+
         for (const message of value.messages ?? []) {
           try {
+            if (await isCallRelatedOrSystemMessage(message, trackedCallIds)) {
+              console.info(
+                `[Webhook] Filtered out call/system interactive message ${message.id} (type: ${message.type})`,
+              );
+              continue;
+            }
+
             const mappedType = mapMessageType(message.type);
             const text = extractTextContent(message);
             const mediaId = extractMediaId(message);

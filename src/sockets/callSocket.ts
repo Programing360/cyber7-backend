@@ -12,6 +12,7 @@ import {
   initiateMetaOutgoingCall,
 } from "../services/whatsapp-calling-webhook.service.js";
 import { createCallEndMessage } from "../modules/services/call-message.service.js";
+import { markWorkspaceConversationAsRead } from "../modules/whatsapp/whatsapp-chat.service.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { decrypt } from "../utils/encryption.js";
 
@@ -94,6 +95,7 @@ export interface ServerToClientEvents {
     conversationId: string;
     contactId: string;
     whatsappAccountId: string;
+    waMessageId?: string;
     direction: string;
     type: string;
     status: string;
@@ -105,6 +107,37 @@ export interface ServerToClientEvents {
     createdAt: string;
   }) => void;
 
+  "message-status-updated": (data: {
+    _id?: string;
+    messageId?: string;
+    waMessageId?: string;
+    conversationId: string;
+    status: string;
+    statusUpdatedAt?: string;
+    errorMessage?: string;
+  }) => void;
+
+  "message:updated"?: (data: {
+    message: {
+      _id?: string;
+      messageId?: string;
+      waMessageId?: string;
+      conversationId: string;
+      status: string;
+      statusUpdatedAt?: string;
+      errorMessage?: string;
+      [key: string]: unknown;
+    };
+  }) => void;
+
+  "conversation:read": (data: {
+    workspaceId: string;
+    conversationId: string;
+    readBy?: string;
+    readAt: string;
+    updatedCount?: number;
+  }) => void;
+
   "call-terminated": (data: { workspaceId: string; callId?: string }) => void;
 
   "call-ended": (data: { callSid: string }) => void;
@@ -114,6 +147,15 @@ export interface ServerToClientEvents {
 
 export interface ClientToServerEvents {
   "join-workspace": (workspaceId: string) => void;
+
+  "join-conversation": (conversationId: string) => void;
+
+  "leave-conversation": (conversationId: string) => void;
+
+  "mark-conversation-read": (
+    data: { workspaceId: string; conversationId: string },
+    ack?: (error: Error | null, response?: { success: boolean }) => void,
+  ) => void;
 
   "answer-incoming-call": (
     data: { workspaceId: string; callId: string; sdpAnswer?: string },
@@ -261,27 +303,38 @@ const authorizeWorkspace = async (
   }
 
   const [activeUser, activeWorkspace, membership] = await Promise.all([
-    User.exists({
-      _id: socket.data.userId,
-      isActive: true,
-    }),
-    Workspace.exists({
-      _id: workspaceId,
-      status: "ACTIVE",
-    }),
-    Membership.exists({
+    User.findById(socket.data.userId).select("_id isActive role isSuperAdmin"),
+    Workspace.findById(workspaceId).select("_id ownerId status"),
+    Membership.findOne({
       workspaceId,
       userId: socket.data.userId,
       status: "ACTIVE",
-    }),
+    }).select("_id role"),
   ]);
 
-  if (!activeUser) {
+  if (!activeUser || !activeUser.isActive) {
     emitSocketError(socket, "USER_INACTIVE", "Your account is inactive.");
     return false;
   }
 
-  if (!activeWorkspace || !membership) {
+  if (!activeWorkspace || activeWorkspace.status !== "ACTIVE") {
+    emitSocketError(
+      socket,
+      "WORKSPACE_INACTIVE",
+      "This workspace is not active.",
+    );
+    return false;
+  }
+
+  const isOwner =
+    Boolean(activeWorkspace.ownerId) &&
+    activeWorkspace.ownerId.toString() === socket.data.userId;
+
+  const isSuperAdmin =
+    (activeUser as any).isSuperAdmin === true ||
+    (activeUser as any).role === "PLATFORM_SUPER_ADMIN";
+
+  if (!membership && !isOwner && !isSuperAdmin) {
     emitSocketError(
       socket,
       "WORKSPACE_ACCESS_DENIED",
@@ -437,6 +490,53 @@ export const initCallSocket = (io: CallSocketServer): void => {
           "WORKSPACE_JOIN_FAILED",
           "Unable to join workspace.",
         );
+      }
+    });
+
+    /**
+     * Active conversation room tracking & real-time focus
+     */
+    authenticatedSocket.on("join-conversation", (convId) => {
+      if (typeof convId === "string" && convId.trim()) {
+        void authenticatedSocket.join(`conv_${convId.trim()}`);
+      }
+    });
+
+    authenticatedSocket.on("leave-conversation", (convId) => {
+      if (typeof convId === "string" && convId.trim()) {
+        void authenticatedSocket.leave(`conv_${convId.trim()}`);
+      }
+    });
+
+    /**
+     * Mark conversation as read (Read receipts / Double Blue Ticks)
+     */
+    authenticatedSocket.on("mark-conversation-read", async (data, ack) => {
+      try {
+        const rawWsId = typeof data === "object" ? data?.workspaceId : undefined;
+        const rawConvId = typeof data === "object" ? data?.conversationId : data;
+
+        if (!isValidObjectId(rawWsId) || !isValidObjectId(rawConvId)) {
+          ack?.(new Error("A valid workspaceId and conversationId are required."));
+          return;
+        }
+
+        const allowed = await authorizeWorkspace(authenticatedSocket, rawWsId);
+        if (!allowed) {
+          ack?.(new Error("Workspace access denied."));
+          return;
+        }
+
+        await markWorkspaceConversationAsRead({
+          workspaceId: rawWsId,
+          conversationId: rawConvId,
+          userId,
+        });
+
+        ack?.(null, { success: true });
+      } catch (error: any) {
+        console.error("[Call Socket] mark-conversation-read error:", error?.message);
+        ack?.(error);
       }
     });
 
@@ -764,7 +864,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
             callId: response.callId,
             status: "CANCELLED" as const,
           };
-          authenticatedSocket.emit("incoming-call-ended", cancelData);
           io.to(data.workspaceId).emit("incoming-call-ended", cancelData);
           io.to(`workspace_${data.workspaceId}`).emit(
             "incoming-call-ended",
@@ -882,23 +981,42 @@ export const initCallSocket = (io: CallSocketServer): void => {
             await terminateMetaCall(phoneId, metaCallId, token);
           }
 
-          const isRinging =
-            call.status === "RINGING" || call.status === "ASSIGNING";
-          call.status = isRinging ? "CANCELLED" : "ENDED";
+          const isAnswered =
+            call.status === "CONNECTED" ||
+            Boolean(call.answeredAt) ||
+            Boolean(call.durationSeconds && call.durationSeconds > 0);
+
           call.endedAt = new Date();
-          if (isRinging) {
+          if (isAnswered) {
+            call.status = "ENDED";
+            if (!call.durationSeconds || call.durationSeconds <= 0) {
+              const startTime = call.answeredAt
+                ? new Date(call.answeredAt).getTime()
+                : new Date(call.startedAt).getTime();
+              call.durationSeconds = Math.max(
+                1,
+                Math.round((call.endedAt.getTime() - startTime) / 1000),
+              );
+            }
+          } else {
+            const isRinging =
+              call.status === "RINGING" || call.status === "ASSIGNING";
+            call.status = isRinging ? "CANCELLED" : "ENDED";
             call.durationSeconds = 0;
           }
           await call.save();
 
-          // Generate and broadcast call log bubble in chat
-          await createCallEndMessage(call._id);
+          // Generate or update unified call log bubble in chat
+          await createCallEndMessage(call._id, {
+            forceCompleted: isAnswered,
+            durationSeconds: call.durationSeconds,
+          });
 
           const endData = {
             notificationId: metaCallId || call._id.toString(),
             workspaceId: data.workspaceId,
             callId: metaCallId || call._id.toString(),
-            status: (isRinging ? "CANCELLED" : "ENDED") as "ENDED" | "CANCELLED",
+            status: (isAnswered ? "ENDED" : "CANCELLED") as "ENDED" | "CANCELLED",
           };
 
           io.to(data.workspaceId).emit("incoming-call-ended", endData);
@@ -906,7 +1024,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
             "incoming-call-ended",
             endData,
           );
-          authenticatedSocket.emit("incoming-call-ended", endData);
         }
       } catch (error) {
         console.error("[Call Socket] Hangup event failed:", error);
@@ -993,18 +1110,40 @@ export const initCallSocket = (io: CallSocketServer): void => {
             await terminateMetaCall(phoneId, metaCallId, token);
           }
 
-          call.status = "CANCELLED";
-          call.endedAt = new Date();
-          call.durationSeconds = 0;
-          await call.save();
+          const isAnswered =
+            call.status === "CONNECTED" ||
+            Boolean(call.answeredAt) ||
+            Boolean(call.durationSeconds && call.durationSeconds > 0);
 
-          await createCallEndMessage(call._id);
+          call.endedAt = new Date();
+          if (!isAnswered) {
+            call.status = "CANCELLED";
+            call.durationSeconds = 0;
+            await call.save();
+            await createCallEndMessage(call._id);
+          } else {
+            call.status = "ENDED";
+            if (!call.durationSeconds || call.durationSeconds <= 0) {
+              const startTime = call.answeredAt
+                ? new Date(call.answeredAt).getTime()
+                : new Date(call.startedAt).getTime();
+              call.durationSeconds = Math.max(
+                1,
+                Math.round((call.endedAt.getTime() - startTime) / 1000),
+              );
+            }
+            await call.save();
+            await createCallEndMessage(call._id, {
+              forceCompleted: true,
+              durationSeconds: call.durationSeconds,
+            });
+          }
 
           const cancelData = {
             notificationId: metaCallId || call._id.toString(),
             workspaceId: data.workspaceId,
             callId: metaCallId || call._id.toString(),
-            status: "CANCELLED" as const,
+            status: (isAnswered ? "ENDED" : "CANCELLED") as "ENDED" | "CANCELLED",
           };
 
           io.to(data.workspaceId).emit("incoming-call-ended", cancelData);
@@ -1012,7 +1151,6 @@ export const initCallSocket = (io: CallSocketServer): void => {
             "incoming-call-ended",
             cancelData,
           );
-          authenticatedSocket.emit("incoming-call-ended", cancelData);
         }
       } catch (error) {
         console.error("[Call Socket] Call cancel failed:", error);

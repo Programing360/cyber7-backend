@@ -120,7 +120,7 @@ const io = new Server<
   CallSocketData
 >(server, {
   cors: corsOptions,
-  transports: ["websocket", "polling"],
+  transports: ["polling", "websocket"],
 });
 
 // Preserve exact request bytes for Meta webhook signature verification.

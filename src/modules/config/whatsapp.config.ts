@@ -63,7 +63,11 @@ export const whatsappConfig = {
   },
 
   get graphApiVersion(): string {
-    return process.env.META_GRAPH_API_VERSION?.trim() || "v26.0";
+    return (
+      process.env.GRAPH_API_VERSION?.trim() ||
+      process.env.META_GRAPH_API_VERSION?.trim() ||
+      "v21.0"
+    );
   },
 
   get webhookVerifyToken(): string {

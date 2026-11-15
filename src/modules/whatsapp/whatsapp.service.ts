@@ -155,6 +155,295 @@ export async function connectWhatsAppAccount({
   }
 }
 
+// ─── Embedded Signup ──────────────────────────────────────────────────────────
+
+export interface CompleteEmbeddedSignupInput {
+  workspaceId: string;
+  code: string;
+  wabaId?: string;
+  phoneNumberId?: string;
+}
+
+export async function completeEmbeddedSignup({
+  workspaceId,
+  code,
+  wabaId: inputWabaId,
+  phoneNumberId: inputPhoneNumberId,
+}: CompleteEmbeddedSignupInput) {
+  if (!code || typeof code !== "string" || code.trim().length === 0) {
+    throw new AppError(
+      "Authorization code is required to complete WhatsApp Embedded Signup.",
+      400,
+      "MISSING_AUTH_CODE",
+    );
+  }
+
+  const appId = whatsappConfig.appId;
+  const appSecret = whatsappConfig.appSecret;
+  const graphVersion = whatsappConfig.graphApiVersion;
+
+  if (!appId || !appSecret) {
+    throw new AppError(
+      "Meta App ID or App Secret is not configured on the server. Please verify META_APP_ID and META_APP_SECRET.",
+      500,
+      "META_APP_NOT_CONFIGURED",
+    );
+  }
+
+  // ── Step A: Exchange temporary authorization code for long-lived access token ─
+  const tokenUrl = new URL(
+    `https://graph.facebook.com/${graphVersion}/oauth/access_token`,
+  );
+  tokenUrl.searchParams.set("client_id", appId);
+  tokenUrl.searchParams.set("client_secret", appSecret);
+  tokenUrl.searchParams.set("code", code.trim());
+
+  let tokenData: any;
+  try {
+    const tokenRes = await fetch(tokenUrl.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    tokenData = (await tokenRes.json().catch(() => ({}))) as any;
+
+    if (!tokenRes.ok || !tokenData?.access_token) {
+      const errMsg =
+        tokenData?.error?.message ||
+        "Failed to exchange authorization code for access token with Meta.";
+      console.error("[Embedded Signup] Token exchange error:", tokenData?.error);
+      throw new AppError(errMsg, 400, "TOKEN_EXCHANGE_FAILED");
+    }
+  } catch (err: any) {
+    if (err instanceof AppError) throw err;
+    console.error("[Embedded Signup] Network error during token exchange:", err);
+    throw new AppError(
+      "Failed to communicate with Meta Graph API for token exchange.",
+      502,
+      "META_NETWORK_ERROR",
+    );
+  }
+
+  const accessToken: string = tokenData.access_token;
+
+  // ── Resolve WABA ID and Phone Number ID (from input or fallback discovery) ───
+  let resolvedWabaId = inputWabaId?.trim();
+  let resolvedPhoneNumberId = inputPhoneNumberId?.trim();
+
+  // Fallback 1: Resolve WABA ID via /me/whatsapp_business_accounts
+  if (!resolvedWabaId) {
+    try {
+      const wabaQueryUrl = `https://graph.facebook.com/${graphVersion}/me/whatsapp_business_accounts?fields=id,name`;
+      const wabaRes = await fetch(wabaQueryUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+      const wabaResult = (await wabaRes.json().catch(() => ({}))) as any;
+      if (Array.isArray(wabaResult?.data) && wabaResult.data.length > 0) {
+        resolvedWabaId = wabaResult.data[0].id;
+      }
+    } catch (resolveErr) {
+      console.warn(
+        "[Embedded Signup] Fallback WABA resolution error:",
+        resolveErr,
+      );
+    }
+  }
+
+  if (!resolvedWabaId) {
+    throw new AppError(
+      "Could not identify WhatsApp Business Account (WABA ID). Please ensure Embedded Signup finished successfully.",
+      400,
+      "MISSING_WABA_ID",
+    );
+  }
+
+  // Fallback 2: Resolve Phone Number ID via WABA phone_numbers
+  if (!resolvedPhoneNumberId) {
+    try {
+      const phoneQueryUrl = `https://graph.facebook.com/${graphVersion}/${resolvedWabaId}/phone_numbers?fields=id,display_phone_number,verified_name`;
+      const phoneRes = await fetch(phoneQueryUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+      const phoneResult = (await phoneRes.json().catch(() => ({}))) as any;
+      if (Array.isArray(phoneResult?.data) && phoneResult.data.length > 0) {
+        resolvedPhoneNumberId = phoneResult.data[0].id;
+      }
+    } catch (resolveErr) {
+      console.warn(
+        "[Embedded Signup] Fallback Phone Number resolution error:",
+        resolveErr,
+      );
+    }
+  }
+
+  if (!resolvedPhoneNumberId) {
+    throw new AppError(
+      "Could not identify WhatsApp Phone Number ID. Please ensure a phone number was selected during Embedded Signup.",
+      400,
+      "MISSING_PHONE_NUMBER_ID",
+    );
+  }
+
+  // ── Step B: Subscribe Webhook to WABA (subscribed_apps) ──────────────────────
+  try {
+    const subscribeUrl = `https://graph.facebook.com/${graphVersion}/${resolvedWabaId}/subscribed_apps`;
+    const subscribeRes = await fetch(subscribeUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    });
+    const subscribeData = (await subscribeRes.json().catch(() => ({}))) as any;
+    if (!subscribeRes.ok && !subscribeData?.success) {
+      console.warn(
+        `[Embedded Signup] WABA webhook subscription notice:`,
+        subscribeData?.error?.message || subscribeData,
+      );
+    } else {
+      console.info(
+        `[Embedded Signup] Successfully subscribed webhook to WABA: ${resolvedWabaId}`,
+      );
+    }
+  } catch (subErr) {
+    console.warn("[Embedded Signup] Error subscribing WABA to app:", subErr);
+  }
+
+  // ── Step C: Register Phone Number for Cloud API messaging ────────────────────
+  try {
+    const registerUrl = `https://graph.facebook.com/${graphVersion}/${resolvedPhoneNumberId}/register`;
+    const registerRes = await fetch(registerUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        pin: "123456",
+      }),
+    });
+    const registerData = (await registerRes.json().catch(() => ({}))) as any;
+    const isAlreadyRegistered =
+      registerData?.error?.error_subcode === 133010 ||
+      registerData?.error?.message?.toLowerCase().includes("already registered");
+
+    if (!registerRes.ok && !registerData?.success && !isAlreadyRegistered) {
+      console.warn(
+        `[Embedded Signup] Phone number register notice:`,
+        registerData?.error?.message || registerData,
+      );
+    } else {
+      console.info(
+        `[Embedded Signup] Phone number ${resolvedPhoneNumberId} registered successfully for Cloud API.`,
+      );
+    }
+  } catch (regErr) {
+    console.warn("[Embedded Signup] Error registering phone number:", regErr);
+  }
+
+  // ── Step D: Fetch Phone Details & Save in MongoDB ────────────────────────────
+  let displayPhoneNumber = "Unknown";
+  let verifiedName = "WhatsApp Business";
+
+  try {
+    const detailsUrl = `https://graph.facebook.com/${graphVersion}/${resolvedPhoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status`;
+    const detailsRes = await fetch(detailsUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+    const detailsData = (await detailsRes.json().catch(() => ({}))) as any;
+    if (detailsData?.display_phone_number) {
+      displayPhoneNumber = detailsData.display_phone_number;
+    }
+    if (detailsData?.verified_name) {
+      verifiedName = detailsData.verified_name;
+    }
+  } catch (detailErr) {
+    console.warn("[Embedded Signup] Error fetching phone details:", detailErr);
+  }
+
+  // If verifiedName is still generic, attempt to fetch WABA name
+  if (verifiedName === "WhatsApp Business") {
+    try {
+      const wabaUrl = `https://graph.facebook.com/${graphVersion}/${resolvedWabaId}?fields=id,name`;
+      const wabaRes = await fetch(wabaUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+      const wabaData = (await wabaRes.json().catch(() => ({}))) as any;
+      if (wabaData?.name) {
+        verifiedName = wabaData.name;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const encryptedToken = encrypt(accessToken);
+  const targetWorkspaceId = new Types.ObjectId(workspaceId);
+
+  // Check if account already exists for this phone number or WABA
+  let account = await WhatsAppAccount.findOne({
+    $or: [
+      { phoneNumberId: resolvedPhoneNumberId },
+      {
+        workspaceId: targetWorkspaceId,
+        businessAccountId: resolvedWabaId,
+      },
+    ],
+  });
+
+  if (account) {
+    account.workspaceId = targetWorkspaceId;
+    account.businessName = verifiedName;
+    account.businessAccountId = resolvedWabaId;
+    account.phoneNumberId = resolvedPhoneNumberId;
+    account.displayPhoneNumber =
+      displayPhoneNumber !== "Unknown"
+        ? displayPhoneNumber
+        : account.displayPhoneNumber;
+    account.accessTokenEncrypted = encryptedToken;
+    account.status = "CONNECTED";
+    account.webhookVerified = true;
+    account.connectedAt = new Date();
+    await account.save();
+  } else {
+    account = await WhatsAppAccount.create({
+      workspaceId: targetWorkspaceId,
+      businessName: verifiedName,
+      businessAccountId: resolvedWabaId,
+      phoneNumberId: resolvedPhoneNumberId,
+      displayPhoneNumber,
+      accessTokenEncrypted: encryptedToken,
+      status: "CONNECTED",
+      webhookVerified: true,
+      connectedAt: new Date(),
+    });
+  }
+
+  console.info(
+    `[Embedded Signup] Successfully connected WABA ${resolvedWabaId} (${displayPhoneNumber}) to workspace ${workspaceId}`,
+  );
+
+  return sanitizeAccount(account);
+}
+
 // ─── List ─────────────────────────────────────────────────────────────────────
 
 export async function listWhatsAppAccounts(workspaceId: string) {

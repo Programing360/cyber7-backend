@@ -21,24 +21,28 @@ export function formatCallDuration(seconds?: number | null): string {
   return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
+export interface CreateCallEndMessageOptions {
+  forceCompleted?: boolean;
+  durationSeconds?: number;
+}
+
 /**
- * Inserts a system "CALL" message into WhatsAppMessage stream when a call ends
- * and broadcasts it via Socket.IO to the workspace room.
+ * Inserts or updates a single unified "CALL" message in WhatsAppMessage stream
+ * when a call ends or updates its lifecycle, and broadcasts it via Socket.IO.
  */
 export async function createCallEndMessage(
   callLogId: Types.ObjectId | string,
+  options?: CreateCallEndMessageOptions,
 ): Promise<void> {
   try {
-    const call = await CallLog.findById(callLogId);
-    if (!call) return;
-
-    // Idempotency: Prevent duplicate message
-    const existingMsg = await WhatsAppMessage.findOne({
-      callLogId: call._id,
-    });
-    if (existingMsg) {
-      return;
+    let call = null;
+    if (mongoose.Types.ObjectId.isValid(callLogId)) {
+      call = await CallLog.findById(callLogId);
     }
+    if (!call) {
+      call = await CallLog.findOne({ providerCallId: String(callLogId) });
+    }
+    if (!call) return;
 
     const rawNumber = call.phoneNumber || "";
     const cleanNumber = rawNumber.replace(/\D/g, "") || rawNumber;
@@ -126,91 +130,166 @@ export async function createCallEndMessage(
       });
     }
 
-    // 3. Determine direction, call status, and message text
+    // 3. Compute accurate duration and answered status
+    const calculatedDuration =
+      options?.durationSeconds !== undefined && options.durationSeconds > 0
+        ? options.durationSeconds
+        : (call.durationSeconds ?? 0) > 0
+          ? call.durationSeconds
+          : call.answeredAt && call.endedAt
+            ? Math.max(
+                0,
+                Math.round(
+                  (new Date(call.endedAt).getTime() -
+                    new Date(call.answeredAt).getTime()) /
+                    1000,
+                ),
+              )
+            : 0;
+
+    const isExplicitlyAnswered =
+      Boolean(options?.forceCompleted) ||
+      call.status === "CONNECTED" ||
+      call.status === "ENDED" ||
+      calculatedDuration > 0 ||
+      Boolean(call.answeredAt) ||
+      Boolean((call as any).connectedAt);
+
+    const isCancelled =
+      call.status === "CANCELLED" &&
+      !call.answeredAt &&
+      calculatedDuration === 0;
+
+    const isRejected =
+      call.status === "REJECTED" &&
+      !call.answeredAt &&
+      calculatedDuration === 0;
+
+    const isMissed = isCancelled || isRejected || !isExplicitlyAnswered;
+
+    let text: string;
+    let msgType: "voice_call" | "missed_call";
+
+    if (!isMissed) {
+      msgType = "voice_call";
+      text = `Voice call • ${formatCallDuration(calculatedDuration)}`;
+    } else if (isRejected) {
+      msgType = "missed_call";
+      text = "Declined voice call";
+    } else if (isCancelled) {
+      msgType = "missed_call";
+      text = "Cancelled voice call";
+    } else if (call.callType === "OUTGOING") {
+      msgType = "missed_call";
+      text = "Unanswered voice call";
+    } else {
+      msgType = "missed_call";
+      text = "Missed voice call";
+    }
+
     const direction: "OUTBOUND" | "INBOUND" =
       call.callType === "OUTGOING" ? "OUTBOUND" : "INBOUND";
 
-    const isMissed =
-      call.callType === "MISSED" ||
-      call.status === "MISSED" ||
-      call.status === "REJECTED" ||
-      call.status === "CANCELLED" ||
-      (call.durationSeconds ?? 0) <= 0;
-
-    let text: string;
-    const msgType = isMissed ? "missed_call" : "voice_call";
-
-    if (isMissed) {
-      if (call.status === "REJECTED") {
-        text = "Declined voice call";
-      } else if (call.status === "CANCELLED") {
-        text = "Cancelled voice call";
-      } else if (call.callType === "OUTGOING") {
-        text = "Unanswered voice call";
-      } else {
-        text = "Missed voice call";
-      }
-    } else {
-      text = `Voice call • ${formatCallDuration(call.durationSeconds)}`;
-    }
-
-    // 4. Insert message in WhatsAppMessage collection
-    const message = await WhatsAppMessage.create({
-      workspaceId: call.workspaceId,
-      conversationId: conversation._id,
-      contactId: contact._id,
-      whatsappAccountId: conversation.whatsappAccountId,
-      direction,
-      type: msgType,
-      status: "DELIVERED",
-      text,
-      callLogId: call._id,
-      timestamp: call.endedAt || new Date(),
+    // 4. Idempotency & Upsert: Find existing call message for this call
+    let existingMsg = await WhatsAppMessage.findOne({
+      $or: [
+        { callLogId: call._id },
+        ...(call.providerCallId
+          ? [{ waMessageId: call.providerCallId }]
+          : []),
+      ],
     });
 
+    let messageDoc = existingMsg;
+
+    if (existingMsg) {
+      // Update existing single message in-place
+      existingMsg.type = msgType;
+      existingMsg.status = "DELIVERED";
+      existingMsg.text = text;
+      if (call.endedAt) {
+        existingMsg.timestamp = call.endedAt;
+      }
+      if (!existingMsg.callLogId) {
+        existingMsg.callLogId = call._id as any;
+      }
+      if (!existingMsg.waMessageId && call.providerCallId) {
+        existingMsg.waMessageId = call.providerCallId;
+      }
+      await existingMsg.save();
+    } else {
+      // Insert single new message in WhatsAppMessage collection
+      messageDoc = await WhatsAppMessage.create({
+        workspaceId: call.workspaceId,
+        conversationId: conversation._id,
+        contactId: contact._id,
+        whatsappAccountId: conversation.whatsappAccountId,
+        direction,
+        type: msgType,
+        status: "DELIVERED",
+        text,
+        callLogId: call._id,
+        waMessageId: call.providerCallId,
+        timestamp: call.endedAt || new Date(),
+      });
+    }
+
+    const finalMessage = messageDoc!;
+
     // 5. Update conversation timestamp and lastMessage preview
-    conversation.lastMessageAt = message.timestamp;
+    conversation.lastMessageAt = finalMessage.timestamp;
     (conversation as any).lastMessage = {
-      _id: message._id,
-      text: message.text,
-      type: message.type,
-      direction: message.direction,
-      status: message.status,
-      timestamp: message.timestamp,
+      _id: finalMessage._id,
+      text: finalMessage.text,
+      type: finalMessage.type,
+      direction: finalMessage.direction,
+      status: finalMessage.status,
+      timestamp: finalMessage.timestamp,
     };
     await conversation.save();
 
-    // 6. Broadcast via Socket.IO ("new-message")
+    // 6. Broadcast via Socket.IO to connected clients
     const io = getCallSocketIO();
     if (io) {
       const wsId = call.workspaceId.toString();
       const flatPayload = {
-        _id: message._id.toString(),
+        _id: finalMessage._id.toString(),
         workspaceId: wsId,
         conversationId: conversation._id.toString(),
         contactId: contact._id.toString(),
         whatsappAccountId: conversation.whatsappAccountId.toString(),
-        direction: message.direction,
-        type: message.type,
+        direction: finalMessage.direction,
+        type: finalMessage.type,
         status: "DELIVERED",
-        text: message.text,
+        text: finalMessage.text,
         callLogId: call._id.toString(),
-        timestamp: message.timestamp.toISOString(),
-        createdAt: (message as any).createdAt
-          ? (message as any).createdAt.toISOString()
-          : message.timestamp.toISOString(),
+        waMessageId: finalMessage.waMessageId || call.providerCallId,
+        timestamp: finalMessage.timestamp.toISOString(),
+        createdAt: (finalMessage as any).createdAt
+          ? (finalMessage as any).createdAt.toISOString()
+          : finalMessage.timestamp.toISOString(),
       };
 
-      io.to(wsId).emit("new-message" as any, flatPayload);
-      io.to(`workspace_${wsId}`).emit("new-message" as any, flatPayload);
+      // Emit message:updated for in-place update and new-message for initial render
+      io.to(wsId).emit(
+        (existingMsg ? "message:updated" : "new-message") as any,
+        flatPayload,
+      );
+      io.to(`workspace_${wsId}`).emit(
+        (existingMsg ? "message:updated" : "new-message") as any,
+        flatPayload,
+      );
+
       console.info(
-        `[CallMessageService] Broadcasted call log message (${msgType}) to workspace ${wsId}`,
+        `[CallMessageService] Broadcasted single call message (${existingMsg ? "updated" : "created"} - ${msgType}) to workspace ${wsId}`,
       );
     }
   } catch (error) {
     console.error(
-      "[CallMessageService] Failed to create call end message:",
+      "[CallMessageService] Failed to create or update call end message:",
       error,
     );
   }
 }
+
+export const syncCallMessage = createCallEndMessage;

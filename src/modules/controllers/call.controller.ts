@@ -515,8 +515,16 @@ export const endCallSession = async (
     call.durationSeconds = finalDuration;
     await call.save();
 
-    // Automatically generate and broadcast chat call log bubble
-    await createCallEndMessage(call._id);
+    // Automatically generate and broadcast chat call log bubble (upserts single record)
+    const isAnswered =
+      finalDuration > 0 ||
+      call.status === "ENDED" ||
+      Boolean(call.answeredAt);
+
+    await createCallEndMessage(call._id, {
+      forceCompleted: isAnswered,
+      durationSeconds: finalDuration,
+    });
 
     return res.status(200).json({
       success: true,

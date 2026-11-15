@@ -41,7 +41,7 @@ export function broadcastNewMessage(
   message: IWhatsAppMessage,
 ) {
   try {
-    const io = getCallSocketIO();
+    const io = globalThis.__CALL_SOCKET_IO__ ?? getCallSocketIO();
     if (!io) return;
     const wsId = workspaceId.toString();
     const payload = {
@@ -50,6 +50,7 @@ export function broadcastNewMessage(
       conversationId: message.conversationId.toString(),
       contactId: message.contactId.toString(),
       whatsappAccountId: message.whatsappAccountId.toString(),
+      waMessageId: message.waMessageId,
       direction: message.direction,
       type: message.type,
       status: message.status,
@@ -70,6 +71,42 @@ export function broadcastNewMessage(
     io.to(`workspace_${wsId}`).emit("new-message", payload);
   } catch (err) {
     console.warn("[Socket.IO] Failed to broadcast new-message:", err);
+  }
+}
+
+/**
+ * Broadcasts a status update for a message via Socket.IO
+ */
+export function broadcastMessageStatusUpdate(
+  workspaceId: string | Types.ObjectId,
+  update: {
+    messageId?: string;
+    waMessageId?: string;
+    conversationId: string;
+    status: WhatsAppMessageStatus;
+    statusUpdatedAt?: string;
+    errorMessage?: string;
+  },
+) {
+  try {
+    const io = globalThis.__CALL_SOCKET_IO__ ?? getCallSocketIO();
+    if (!io) return;
+    const wsId = workspaceId.toString();
+    const payload = {
+      _id: update.messageId,
+      messageId: update.messageId,
+      waMessageId: update.waMessageId,
+      conversationId: update.conversationId,
+      status: update.status,
+      statusUpdatedAt: update.statusUpdatedAt || new Date().toISOString(),
+      errorMessage: update.errorMessage,
+    };
+    io.to(wsId).emit("message-status-updated", payload);
+    io.to(`workspace_${wsId}`).emit("message-status-updated", payload);
+    io.to(wsId).emit("message:updated" as any, { message: payload } as any);
+    io.to(`workspace_${wsId}`).emit("message:updated" as any, { message: payload } as any);
+  } catch (err) {
+    console.warn("[Socket.IO] Failed to broadcast message-status-updated:", err);
   }
 }
 
@@ -391,6 +428,17 @@ export async function updateWhatsAppMessageStatus({
   }
 
   await message.save();
+
+  // Broadcast status change to connected dashboard clients
+  broadcastMessageStatusUpdate(message.workspaceId, {
+    messageId: message._id.toString(),
+    waMessageId: message.waMessageId,
+    conversationId: message.conversationId.toString(),
+    status: message.status,
+    statusUpdatedAt: incomingTimestamp.toISOString(),
+    errorMessage: message.errorMessage,
+  });
+
   return message;
 }
 

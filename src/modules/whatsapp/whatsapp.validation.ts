@@ -22,6 +22,17 @@ export const connectWhatsAppSchema = z.object({
 
 export type ConnectWhatsAppInput = z.infer<typeof connectWhatsAppSchema>;
 
+export const embeddedSignupCompleteSchema = z.object({
+  code: z.string().trim().min(1, "Authorization code is required"),
+  wabaId: z.string().trim().optional(),
+  phoneNumberId: z.string().trim().optional(),
+  workspaceId: z.string().trim().optional(),
+});
+
+export type EmbeddedSignupCompleteInput = z.infer<
+  typeof embeddedSignupCompleteSchema
+>;
+
 const WHATSAPP_STATUSES = [
   "CONNECTED",
   "DISCONNECTED",

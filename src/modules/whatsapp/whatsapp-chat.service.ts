@@ -8,6 +8,8 @@ import WhatsAppConversation, {
   getCustomerServiceWindowExpiry,
 } from "./conversation.model.js";
 import WhatsAppMessage from "./message.model.js";
+import { makeWorkspaceWhatsAppRequest } from "../services/whatsapp-api.service.js";
+import { getCallSocketIO } from "../../sockets/callSocket.js";
 import type {
   CreateContactInput,
   UpdateContactInput,
@@ -640,5 +642,137 @@ export async function createOrGetWorkspaceConversation({
       getCustomerServiceWindowExpiry(
         conversation.lastCustomerMessageAt,
       )?.toISOString() ?? null,
+  };
+}
+
+// ─── Read Receipts / Mark Conversation Read ─────────────────────────────────
+
+interface MarkConversationAsReadParams {
+  workspaceId: string;
+  conversationId: string;
+  userId?: string;
+}
+
+export async function markWorkspaceConversationAsRead({
+  workspaceId,
+  conversationId,
+  userId,
+}: MarkConversationAsReadParams) {
+  if (!Types.ObjectId.isValid(workspaceId)) {
+    throw new AppError("A valid workspace ID is required", 400);
+  }
+
+  if (!Types.ObjectId.isValid(conversationId)) {
+    throw new AppError("A valid conversation ID is required", 400);
+  }
+
+  const workspaceObjectId = new Types.ObjectId(workspaceId);
+  const conversationObjectId = new Types.ObjectId(conversationId);
+
+  // 1. Verify conversation belongs to this workspace
+  const conversation = await WhatsAppConversation.findOne({
+    _id: conversationObjectId,
+    workspaceId: workspaceObjectId,
+  });
+
+  if (!conversation) {
+    throw new AppError("Conversation not found", 404);
+  }
+
+  const now = new Date();
+
+  // 2. Mark all unread INBOUND messages as READ in MongoDB
+  const updateResult = await WhatsAppMessage.updateMany(
+    {
+      workspaceId: workspaceObjectId,
+      conversationId: conversationObjectId,
+      direction: "INBOUND",
+      status: { $ne: "READ" },
+    },
+    {
+      $set: {
+        status: "READ",
+        statusUpdatedAt: now,
+      },
+    },
+  );
+
+  // 3. Mark unread messages on Meta Graph API in the background (non-blocking)
+  setImmediate(async () => {
+    try {
+      const account = await WhatsAppAccount.findOne({
+        _id: conversation.whatsappAccountId,
+        workspaceId: workspaceObjectId,
+        status: "CONNECTED",
+      }).select("phoneNumberId");
+
+      if (!account?.phoneNumberId) return;
+
+      const unreadInbounds = await WhatsAppMessage.find({
+        workspaceId: workspaceObjectId,
+        conversationId: conversationObjectId,
+        direction: "INBOUND",
+        waMessageId: { $exists: true, $ne: "" },
+      })
+        .sort({ timestamp: -1 })
+        .limit(10)
+        .lean();
+
+      for (const msg of unreadInbounds) {
+        if (!msg.waMessageId) continue;
+        try {
+          await makeWorkspaceWhatsAppRequest(
+            workspaceId,
+            account.phoneNumberId,
+            "messages",
+            {
+              messaging_product: "whatsapp",
+              status: "read",
+              message_id: msg.waMessageId,
+            },
+          );
+        } catch {
+          // Meta API read delivery is best-effort
+        }
+      }
+    } catch (err: any) {
+      console.warn("[Meta Read Receipt Error]:", err?.message);
+    }
+  });
+
+  // 4. Real-time broadcast via Socket.IO
+  try {
+    const io = globalThis.__CALL_SOCKET_IO__ ?? getCallSocketIO();
+    if (io) {
+      const readPayload = {
+        workspaceId,
+        conversationId,
+        readBy: userId,
+        readAt: now.toISOString(),
+        updatedCount: updateResult.modifiedCount,
+      };
+
+      io.to(workspaceId).emit("conversation:read", readPayload);
+      io.to(`workspace_${workspaceId}`).emit("conversation:read", readPayload);
+
+      io.to(workspaceId).emit("message-status-updated", {
+        conversationId,
+        status: "READ",
+        statusUpdatedAt: now.toISOString(),
+      });
+      io.to(`workspace_${workspaceId}`).emit("message-status-updated", {
+        conversationId,
+        status: "READ",
+        statusUpdatedAt: now.toISOString(),
+      });
+    }
+  } catch (socketErr) {
+    console.warn("[Socket.IO] Failed to broadcast conversation:read:", socketErr);
+  }
+
+  return {
+    success: true,
+    modifiedCount: updateResult.modifiedCount,
+    readAt: now.toISOString(),
   };
 }

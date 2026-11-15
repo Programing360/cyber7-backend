@@ -12,6 +12,7 @@ import {
   updateWorkspaceConversationStatus,
   listWorkspaceConversationMessages,
   createOrGetWorkspaceConversation,
+  markWorkspaceConversationAsRead,
 } from "./whatsapp-chat.service.js";
 import {
   createContactSchema,
@@ -378,6 +379,34 @@ export async function createConversationController(
       success: true,
       message: "Conversation created successfully",
       data: conversation,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /:workspaceId/conversations/:conversationId/read
+ */
+export async function markConversationAsReadController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = (req.workspace?.id ?? req.params.workspaceId) as string;
+    const conversationId = req.params.conversationId as string;
+
+    const result = await markWorkspaceConversationAsRead({
+      workspaceId,
+      conversationId,
+      userId: req.user?.id,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Conversation marked as read",
+      data: result,
     });
   } catch (error) {
     next(error);
