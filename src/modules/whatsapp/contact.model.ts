@@ -12,6 +12,7 @@ export interface IWhatsAppContact extends Document {
   assignedAt?: Date;
 
   isOptedOut: boolean;
+  isBlocked?: boolean;
   optOutTimestamp?: Date;
   optOutSource?: "STOP_MESSAGE" | "USER_ACTION" | "API";
 
@@ -63,6 +64,12 @@ const whatsappContactSchema = new Schema<IWhatsAppContact>(
     },
 
     isOptedOut: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    isBlocked: {
       type: Boolean,
       default: false,
       index: true,

@@ -18,6 +18,11 @@ import WhatsAppTemplate from "../whatsapp/template.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import Workspace from "../workspace/workspace.model.js";
 import { makeWorkspaceWhatsAppRequest } from "./whatsapp-api.service.js";
+import {
+  resolveOrCreateWorkspaceContact,
+  resolveOrCreateWorkspaceConversation,
+  findExistingContactByPhone,
+} from "../whatsapp/whatsapp-contact-resolver.service.js";
 
 export {
   CUSTOMER_SERVICE_WINDOW_MS,
@@ -225,81 +230,26 @@ export async function processIncomingWhatsAppMessage({
   );
   const isStartKeyword = /^(start|unstop)$/i.test(cleanedText);
 
-  // 3. Find or create contact with opt-out / opt-in tracking
-  // ⚠️ ফিক্স: waId ফিল্ডটি $set এবং $setOnInsert দুটো থেকেই বাদ দেওয়া হয়েছে (ফিল্টারের কারণে অটো সেট হবে)
-  const contactUpdate: Record<string, unknown> = {
+  // 3. Find or create contact using strict phone normalization & deduplication
+  const contact = await resolveOrCreateWorkspaceContact({
+    workspaceId: account.workspaceId,
     phoneNumber: rawFrom,
-    ...(contactName ? { profileName: contactName } : {}),
-  };
-
-  const contactSetOnInsert: Record<string, unknown> = {
-    createdAt: incomingDate,
-  };
-  const contactUnset: Record<string, 1> = {};
-
-  if (isStopKeyword) {
-    contactUpdate.isOptedOut = true;
-    contactUpdate.optOutTimestamp = incomingDate;
-    contactUpdate.optOutSource = "STOP_MESSAGE";
-  } else if (isStartKeyword) {
-    contactUpdate.optInTimestamp = incomingDate;
-    contactUpdate.optInSource = "START_MESSAGE";
-  } else {
-    contactSetOnInsert.isOptedOut = false;
-  }
-
-  const contact = await WhatsAppContact.findOneAndUpdate(
-    {
-      workspaceId: account.workspaceId,
-      waId: cleanFrom,
-    },
-    {
-      $set: contactUpdate,
-      ...(Object.keys(contactSetOnInsert).length > 0
-        ? { $setOnInsert: contactSetOnInsert }
-        : {}),
-      ...(Object.keys(contactUnset).length > 0 ? { $unset: contactUnset } : {}),
-    },
-    {
-      upsert: true,
-      returnDocument: "after",
-      setDefaultsOnInsert: true,
-    },
-  );
+    profileName: contactName,
+    isOptedOut: isStopKeyword ? true : isStartKeyword ? false : undefined,
+    optOutSource: isStopKeyword ? "STOP_MESSAGE" : undefined,
+    optInSource: isStartKeyword ? "START_MESSAGE" : undefined,
+    timestamp: incomingDate,
+  });
 
   // 4. Find or create conversation — updating 24-hour customer service window timestamp
-
-  const isWindowActive = !isStopKeyword;
-  const expiryDate = getCustomerServiceWindowExpiry
-    ? getCustomerServiceWindowExpiry(incomingDate)
-    : new Date(
-        incomingDate.getTime() +
-          (CUSTOMER_SERVICE_WINDOW_MS || 24 * 60 * 60 * 1000),
-      );
-
-  const conversationStatus = isStopKeyword ? "CLOSED" : "OPEN";
-
-  const conversation = await WhatsAppConversation.findOneAndUpdate(
-    {
-      workspaceId: account.workspaceId,
-      whatsappAccountId: account._id,
-      contactId: contact._id,
-    },
-    {
-      $set: {
-        status: conversationStatus,
-        lastMessageAt: incomingDate,
-        lastCustomerMessageAt: incomingDate,
-        isCustomerServiceWindowActive: true, // ✅ ২৪ ঘণ্টার উইন্ডো সক্রিয় করা হলো
-        customerServiceWindowExpiresAt: expiryDate,
-      },
-    },
-    {
-      upsert: true,
-      returnDocument: "after",
-      setDefaultsOnInsert: true,
-    },
-  );
+  const conversation = await resolveOrCreateWorkspaceConversation({
+    workspaceId: account.workspaceId,
+    whatsappAccountId: account._id,
+    contactId: contact._id as Types.ObjectId,
+    isCustomerMessage: true,
+    messageTimestamp: incomingDate,
+    isStopKeyword,
+  });
 
   // console.log("[INBOUND MESSAGE SAVE]", {
   //   waMessageId: message.id,

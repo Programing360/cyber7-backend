@@ -5,6 +5,11 @@ import WhatsAppContact from "../whatsapp/contact.model.js";
 import WhatsAppAccount from "../whatsapp/whatsapp.model.js";
 import CallLog, { type ICallLog } from "../Calling/CallLog.js";
 import { getCallSocketIO } from "../../sockets/callSocket.js";
+import {
+  findExistingContactByPhone,
+  resolveOrCreateWorkspaceContact,
+  resolveOrCreateWorkspaceConversation,
+} from "../whatsapp/whatsapp-contact-resolver.service.js";
 
 /**
  * Format duration safely as MM:SS or HH:MM:SS
@@ -65,21 +70,13 @@ export async function createCallEndMessage(
     }
 
     if (!contact) {
-      contact = await WhatsAppContact.findOne({
-        workspaceId: call.workspaceId,
-        $or: [
-          { phoneNumber: rawNumber },
-          { phoneNumber: cleanNumber },
-          { waId: cleanNumber },
-        ],
-      });
+      contact = await findExistingContactByPhone(call.workspaceId, rawNumber);
     }
 
     if (!contact) {
-      contact = await WhatsAppContact.create({
+      contact = await resolveOrCreateWorkspaceContact({
         workspaceId: call.workspaceId,
-        phoneNumber: cleanNumber,
-        waId: cleanNumber,
+        phoneNumber: rawNumber,
         profileName:
           call.callerName && call.callerName !== "Unknown"
             ? call.callerName
@@ -88,47 +85,40 @@ export async function createCallEndMessage(
     }
 
     // 2. Resolve or find WhatsAppConversation
-    let conversation = await WhatsAppConversation.findOne({
-      workspaceId: call.workspaceId,
-      contactId: contact._id,
-    });
-
-    if (!conversation) {
-      let account = null;
-      if (call.phoneNumberId) {
-        account = await WhatsAppAccount.findOne({
-          phoneNumberId: call.phoneNumberId,
-          workspaceId: call.workspaceId,
-        });
-      }
-      if (!account) {
-        account = await WhatsAppAccount.findOne({
-          workspaceId: call.workspaceId,
-          status: "CONNECTED",
-        });
-      }
-      if (!account) {
-        account = await WhatsAppAccount.findOne({
-          workspaceId: call.workspaceId,
-        });
-      }
-
-      if (!account) {
-        console.warn(
-          "[CallMessageService] No WhatsAppAccount found for workspace:",
-          call.workspaceId,
-        );
-        return;
-      }
-
-      conversation = await WhatsAppConversation.create({
+    let account = null;
+    if (call.phoneNumberId) {
+      account = await WhatsAppAccount.findOne({
+        phoneNumberId: call.phoneNumberId,
         workspaceId: call.workspaceId,
-        whatsappAccountId: account._id,
-        contactId: contact._id,
-        status: "OPEN",
-        lastMessageAt: call.endedAt || new Date(),
       });
     }
+    if (!account) {
+      account = await WhatsAppAccount.findOne({
+        workspaceId: call.workspaceId,
+        status: "CONNECTED",
+      });
+    }
+    if (!account) {
+      account = await WhatsAppAccount.findOne({
+        workspaceId: call.workspaceId,
+      });
+    }
+
+    if (!account) {
+      console.warn(
+        "[CallMessageService] No WhatsAppAccount found for workspace:",
+        call.workspaceId,
+      );
+      return;
+    }
+
+    const conversation = await resolveOrCreateWorkspaceConversation({
+      workspaceId: call.workspaceId,
+      whatsappAccountId: account._id,
+      contactId: contact._id as Types.ObjectId,
+      messageTimestamp: call.endedAt || new Date(),
+      isCustomerMessage: false,
+    });
 
     // 3. Compute accurate duration and answered status
     const calculatedDuration =

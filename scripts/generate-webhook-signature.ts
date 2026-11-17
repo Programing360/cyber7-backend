@@ -51,16 +51,16 @@ const payload = {
 
 const rawBody = JSON.stringify(payload);
 
-const signature =
-  "sha256=" +
-  createHmac("sha256", appSecret).update(rawBody, "utf8").digest("hex");
+// const signature =
+//   "sha256=" +
+//   createHmac("sha256", appSecret).update(rawBody, "utf8").digest("hex");
 
-console.log("Generated payload length:", Buffer.byteLength(rawBody, "utf8"));
-console.log("Generated signature length:", signature.length);
-console.log("App secret available:", Boolean(appSecret));
+// console.log("Generated payload length:", Buffer.byteLength(rawBody, "utf8"));
+// console.log("Generated signature length:", signature.length);
+// console.log("App secret available:", Boolean(appSecret));
 
-console.log("Payload:");
-console.log(rawBody);
+// console.log("Payload:");
+// console.log(rawBody);
 
-console.log("\nSignature:");
-console.log(signature);
+// console.log("\nSignature:");
+// console.log(signature);

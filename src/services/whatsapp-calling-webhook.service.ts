@@ -13,6 +13,7 @@ import {
 import { getCallSocketIO } from "../sockets/callSocket.js";
 import { decrypt } from "../utils/encryption.js";
 import { createCallEndMessage } from "../modules/services/call-message.service.js";
+import { findExistingContactByPhone } from "../modules/whatsapp/whatsapp-contact-resolver.service.js";
 
 type CallDirection = "USER_INITIATED" | "BUSINESS_INITIATED";
 type CallType = "INCOMING" | "OUTGOING" | "MISSED";
@@ -380,12 +381,14 @@ async function resolveIncomingRecipients(
   workspaceId: Types.ObjectId,
   phoneNumber: string,
 ): Promise<IncomingRecipients> {
-  const contact = await WhatsAppContact.findOne({
-    workspaceId,
-    waId: phoneNumber,
-  })
-    .select("_id assignedTo")
-    .lean();
+  const contact =
+    (await findExistingContactByPhone(workspaceId, phoneNumber)) ||
+    (await WhatsAppContact.findOne({
+      workspaceId,
+      waId: phoneNumber,
+    })
+      .select("_id assignedTo")
+      .lean());
 
   if (contact?.assignedTo) {
     const assignedMembership = await Membership.findOne({

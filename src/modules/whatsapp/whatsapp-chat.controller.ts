@@ -10,6 +10,8 @@ import {
   listWorkspaceConversations,
   getWorkspaceConversationById,
   updateWorkspaceConversationStatus,
+  updateWorkspaceConversation,
+  deleteWorkspaceConversation,
   listWorkspaceConversationMessages,
   createOrGetWorkspaceConversation,
   markWorkspaceConversationAsRead,
@@ -18,6 +20,7 @@ import {
   createContactSchema,
   updateContactSchema,
   updateConversationStatusSchema,
+  updateConversationSchema,
   createConversationSchema,
 } from "./whatsapp.validation.js";
 
@@ -306,6 +309,68 @@ export async function updateConversationStatusController(
       success: true,
       message: "Conversation status updated successfully",
       data: conversation,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * PATCH /:workspaceId/conversations/:conversationId
+ */
+export async function updateConversationController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = (req.workspace?.id ?? req.params.workspaceId) as string;
+    const conversationId = req.params.conversationId as string;
+
+    const parsed = updateConversationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(
+        parsed.error.issues[0]?.message ?? "Invalid conversation update",
+        400,
+      );
+    }
+
+    const conversation = await updateWorkspaceConversation({
+      workspaceId,
+      conversationId,
+      input: parsed.data,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Conversation updated successfully",
+      data: conversation,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /:workspaceId/conversations/:conversationId
+ */
+export async function deleteConversationController(
+  req: WorkspaceRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const workspaceId = (req.workspace?.id ?? req.params.workspaceId) as string;
+    const conversationId = req.params.conversationId as string;
+
+    const result = await deleteWorkspaceConversation({
+      workspaceId,
+      conversationId,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
     });
   } catch (error) {
     next(error);

@@ -7,6 +7,7 @@ export interface IWhatsAppConversation extends Document {
   whatsappAccountId: mongoose.Types.ObjectId;
   contactId: mongoose.Types.ObjectId;
   status: ConversationStatus;
+  isFavorite?: boolean;
   assignedTo?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
   lastCustomerMessageAt?: Date;
@@ -35,6 +36,12 @@ const conversationSchema = new Schema<IWhatsAppConversation>(
       type: Schema.Types.ObjectId,
       ref: "WhatsAppContact",
       required: true,
+    },
+
+    isFavorite: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
 
     status: {

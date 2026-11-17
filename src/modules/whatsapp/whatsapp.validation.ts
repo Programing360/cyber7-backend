@@ -94,13 +94,15 @@ export const updateContactSchema = z
       .max(100, "Profile name cannot exceed 100 characters")
       .optional(),
     isOptedOut: z.boolean().optional(),
+    isBlocked: z.boolean().optional(),
   })
   .strict()
   .refine(
     (data) =>
       data.phoneNumber !== undefined ||
       data.profileName !== undefined ||
-      data.isOptedOut !== undefined,
+      data.isOptedOut !== undefined ||
+      data.isBlocked !== undefined,
     {
       message: "At least one field must be provided to update the contact",
     },
@@ -119,6 +121,21 @@ export const updateConversationStatusSchema = z.object({
 export type UpdateConversationStatusInput = z.infer<
   typeof updateConversationStatusSchema
 >;
+
+export const updateConversationSchema = z
+  .object({
+    status: z.enum(CONVERSATION_STATUSES).optional(),
+    isFavorite: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (data) => data.status !== undefined || data.isFavorite !== undefined,
+    {
+      message: "At least one field must be provided to update the conversation",
+    },
+  );
+
+export type UpdateConversationInput = z.infer<typeof updateConversationSchema>;
 
 export const createConversationSchema = z
   .object({

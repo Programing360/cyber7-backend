@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 
 import WhatsAppAccount from "./whatsapp.model.js";
+import { syncWorkspaceTemplates } from "./template.service.js";
 import { encrypt, decrypt } from "../../utils/encryption.js";
 import { whatsappConfig } from "../config/whatsapp.config.js";
 import { getPlatformWebhookVerificationStatus } from "./meta-platform-config.model.js";
@@ -138,6 +139,15 @@ export async function connectWhatsAppAccount({
       status: "CONNECTED",
       connectedAt: new Date(),
       webhookVerified: true,
+    });
+
+    setImmediate(() => {
+      syncWorkspaceTemplates(workspaceId).catch((err) => {
+        console.warn(
+          `[Auto-Sync Templates] Post-connect sync failed for workspace ${workspaceId}:`,
+          err,
+        );
+      });
     });
 
     return sanitizeAccount(account);
@@ -440,6 +450,15 @@ export async function completeEmbeddedSignup({
   console.info(
     `[Embedded Signup] Successfully connected WABA ${resolvedWabaId} (${displayPhoneNumber}) to workspace ${workspaceId}`,
   );
+
+  setImmediate(() => {
+    syncWorkspaceTemplates(workspaceId).catch((err) => {
+      console.warn(
+        `[Auto-Sync Templates] Embedded signup sync failed for workspace ${workspaceId}:`,
+        err,
+      );
+    });
+  });
 
   return sanitizeAccount(account);
 }

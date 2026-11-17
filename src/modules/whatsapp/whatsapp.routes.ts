@@ -23,6 +23,8 @@ import {
   listConversationsController,
   getConversationByIdController,
   updateConversationStatusController,
+  updateConversationController,
+  deleteConversationController,
   listConversationMessagesController,
   createConversationController,
   markConversationAsReadController,
@@ -203,6 +205,22 @@ whatsappRoutes.patch(
   updateConversationStatusController,
 );
 
+whatsappRoutes.patch(
+  "/:workspaceId/conversations/:conversationId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  updateConversationController,
+);
+
+whatsappRoutes.delete(
+  "/:workspaceId/conversations/:conversationId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  deleteConversationController,
+);
+
 // Messages History Route
 whatsappRoutes.get(
   "/:workspaceId/conversations/:conversationId/messages",
@@ -274,7 +292,7 @@ whatsappRoutes.post(
   "/:workspaceId/templates/sync",
   authenticate,
   requireWorkspaceMembership,
-  requireRole("OWNER", "ADMIN"),
+  requireRole("OWNER", "ADMIN", "AGENT"),
   syncTemplatesController,
 );
 

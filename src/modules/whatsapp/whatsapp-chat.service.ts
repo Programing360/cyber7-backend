@@ -10,6 +10,12 @@ import WhatsAppConversation, {
 import WhatsAppMessage from "./message.model.js";
 import { makeWorkspaceWhatsAppRequest } from "../services/whatsapp-api.service.js";
 import { getCallSocketIO } from "../../sockets/callSocket.js";
+import {
+  normalizeWhatsAppPhoneNumber,
+  findExistingContactByPhone,
+  resolveOrCreateWorkspaceContact,
+  resolveOrCreateWorkspaceConversation,
+} from "./whatsapp-contact-resolver.service.js";
 import type {
   CreateContactInput,
   UpdateContactInput,
@@ -115,47 +121,19 @@ export async function createOrUpsertWorkspaceContact({
     throw new AppError("A valid workspace ID is required", 400);
   }
 
-  const waId = input.phoneNumber.replace(/\D/g, "");
-  if (waId.length < 5) {
+  const rawPhone = input.phoneNumber.trim();
+  const digits = rawPhone.replace(/\D/g, "");
+  if (digits.length < 5) {
     throw new AppError("Invalid phone number format", 400);
   }
 
-  try {
-    const contact = await WhatsAppContact.findOneAndUpdate(
-      {
-        workspaceId: new Types.ObjectId(workspaceId),
-        waId,
-      },
-      {
-        $set: {
-          phoneNumber: input.phoneNumber.trim(),
-          ...(input.profileName
-            ? { profileName: input.profileName.trim() }
-            : {}),
-        },
-      },
-      {
-        upsert: true,
-        returnDocument: "after",
-        setDefaultsOnInsert: true,
-      },
-    );
+  const contact = await resolveOrCreateWorkspaceContact({
+    workspaceId,
+    phoneNumber: rawPhone,
+    profileName: input.profileName?.trim() || undefined,
+  });
 
-    return contact;
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code: number }).code === 11000
-    ) {
-      throw new AppError(
-        "A contact with this phone number already exists in this workspace",
-        409,
-      );
-    }
-    throw error;
-  }
+  return contact;
 }
 
 interface UpdateContactParams {
@@ -216,6 +194,19 @@ export async function updateWorkspaceContact({
       setFields.optInTimestamp = new Date();
       setFields.optInSource = "USER_ACTION";
       // Preserve optOutTimestamp and optOutSource for audit trail rather than silently unsetting
+    }
+  }
+
+  if (input.isBlocked !== undefined) {
+    setFields.isBlocked = Boolean(input.isBlocked);
+    if (input.isBlocked && input.isOptedOut === undefined) {
+      setFields.isOptedOut = true;
+      setFields.optOutTimestamp = new Date();
+      setFields.optOutSource = "USER_ACTION";
+    } else if (!input.isBlocked && input.isOptedOut === undefined) {
+      setFields.isOptedOut = false;
+      setFields.optInTimestamp = new Date();
+      setFields.optInSource = "USER_ACTION";
     }
   }
 
@@ -344,7 +335,10 @@ export async function listWorkspaceConversations({
   const totalPages = Math.ceil(total / limit) || 1;
 
   const conversations = await WhatsAppConversation.find(filter)
-    .populate("contactId", "profileName phoneNumber waId")
+    .populate(
+      "contactId",
+      "profileName phoneNumber waId isBlocked isOptedOut",
+    )
     .populate("assignedTo", "name email")
     .populate("whatsappAccountId", "businessName displayPhoneNumber")
     .sort({ lastMessageAt: -1 })
@@ -431,7 +425,10 @@ export async function getWorkspaceConversationById({
     _id: new Types.ObjectId(conversationId),
     workspaceId: new Types.ObjectId(workspaceId),
   })
-    .populate("contactId", "profileName phoneNumber waId")
+    .populate(
+      "contactId",
+      "profileName phoneNumber waId isBlocked isOptedOut",
+    )
     .populate("assignedTo", "name email")
     .populate("whatsappAccountId", "businessName displayPhoneNumber")
     .lean();
@@ -479,7 +476,10 @@ export async function updateWorkspaceConversationStatus({
     { $set: { status } },
     { returnDocument: "after" },
   )
-    .populate("contactId", "profileName phoneNumber waId")
+    .populate(
+      "contactId",
+      "profileName phoneNumber waId isBlocked isOptedOut",
+    )
     .populate("assignedTo", "name email");
 
   if (!conversation) {
@@ -487,6 +487,83 @@ export async function updateWorkspaceConversationStatus({
   }
 
   return conversation;
+}
+
+export async function updateWorkspaceConversation({
+  workspaceId,
+  conversationId,
+  input,
+}: {
+  workspaceId: string;
+  conversationId: string;
+  input: { status?: ConversationStatus; isFavorite?: boolean };
+}) {
+  if (
+    !Types.ObjectId.isValid(workspaceId) ||
+    !Types.ObjectId.isValid(conversationId)
+  ) {
+    throw new AppError("Invalid workspace or conversation ID", 400);
+  }
+
+  const updateFields: Record<string, unknown> = {};
+  if (input.status !== undefined) {
+    updateFields.status = input.status;
+  }
+  if (input.isFavorite !== undefined) {
+    updateFields.isFavorite = Boolean(input.isFavorite);
+  }
+
+  const conversation = await WhatsAppConversation.findOneAndUpdate(
+    {
+      _id: new Types.ObjectId(conversationId),
+      workspaceId: new Types.ObjectId(workspaceId),
+    },
+    { $set: updateFields },
+    { returnDocument: "after" },
+  )
+    .populate(
+      "contactId",
+      "profileName phoneNumber waId isBlocked isOptedOut",
+    )
+    .populate("assignedTo", "name email");
+
+  if (!conversation) {
+    throw new AppError("Conversation not found", 404);
+  }
+
+  return conversation;
+}
+
+export async function deleteWorkspaceConversation({
+  workspaceId,
+  conversationId,
+}: {
+  workspaceId: string;
+  conversationId: string;
+}) {
+  if (
+    !Types.ObjectId.isValid(workspaceId) ||
+    !Types.ObjectId.isValid(conversationId)
+  ) {
+    throw new AppError("Invalid workspace or conversation ID", 400);
+  }
+
+  const conversation = await WhatsAppConversation.findOneAndDelete({
+    _id: new Types.ObjectId(conversationId),
+    workspaceId: new Types.ObjectId(workspaceId),
+  });
+
+  if (!conversation) {
+    throw new AppError("Conversation not found", 404);
+  }
+
+  // Clean up associated messages
+  await WhatsAppMessage.deleteMany({
+    conversationId: new Types.ObjectId(conversationId),
+    workspaceId: new Types.ObjectId(workspaceId),
+  });
+
+  return { message: "Conversation deleted successfully" };
 }
 
 // ─── Messages History Service ────────────────────────────────────────────────
@@ -602,29 +679,19 @@ export async function createOrGetWorkspaceConversation({
     throw new AppError("Either contactId or phoneNumber is required", 400);
   }
 
-  // Find or create conversation
-  const conversation = await WhatsAppConversation.findOneAndUpdate(
-    {
-      workspaceId: workspaceObjectId,
-      whatsappAccountId: account._id,
-      contactId: targetContactId,
-    },
-    {
-      $setOnInsert: {
-        status: "OPEN",
-        createdAt: new Date(),
-      },
-      $set: {
-        updatedAt: new Date(),
-      },
-    },
-    {
-      upsert: true,
-      returnDocument: "after",
-      setDefaultsOnInsert: true,
-    },
-  )
-    .populate("contactId", "profileName phoneNumber waId")
+  // Find or create conversation with strict single-conversation guarantee
+  const conversationDoc = await resolveOrCreateWorkspaceConversation({
+    workspaceId: workspaceObjectId,
+    whatsappAccountId: account._id,
+    contactId: targetContactId,
+    isCustomerMessage: false,
+  });
+
+  const conversation = await WhatsAppConversation.findById(conversationDoc._id)
+    .populate(
+      "contactId",
+      "profileName phoneNumber waId isBlocked isOptedOut",
+    )
     .populate("assignedTo", "name email")
     .populate("whatsappAccountId", "businessName displayPhoneNumber")
     .lean();

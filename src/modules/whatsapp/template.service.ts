@@ -64,6 +64,31 @@ export async function listWorkspaceTemplates({
   }
 
   const targetWorkspaceId = new Types.ObjectId(workspaceId);
+
+  // Lazy auto-sync: If no templates exist in DB for this workspace, but a connected account exists, trigger sync!
+  const existingCount = await WhatsAppTemplate.countDocuments({
+    workspaceId: targetWorkspaceId,
+    status: { $ne: "DELETED" },
+  });
+
+  if (existingCount === 0) {
+    const hasConnectedAccount = await WhatsAppAccount.exists({
+      workspaceId: targetWorkspaceId,
+      status: "CONNECTED",
+    });
+
+    if (hasConnectedAccount) {
+      try {
+        await syncWorkspaceTemplates(workspaceId);
+      } catch (syncErr) {
+        console.warn(
+          `[Auto-Sync Templates] Lazy auto-sync failed for workspace ${workspaceId}:`,
+          syncErr,
+        );
+      }
+    }
+  }
+
   const filter: Record<string, unknown> = {
     workspaceId: targetWorkspaceId,
   };
@@ -229,6 +254,7 @@ export async function fetchMetaTemplatesForWaba(
     } | null;
 
     if (!response.ok) {
+      console.error("[Meta Templates Error]:", data?.error);
       const errorCode = data?.error?.code;
 
       if (errorCode === 190) {
@@ -240,7 +266,8 @@ export async function fetchMetaTemplatesForWaba(
 
       // Never expose raw Meta internal errors to the client
       throw new AppError(
-        "Failed to fetch templates from Meta. Please check your WhatsApp Business account credentials and permissions.",
+        data?.error?.message ||
+          "Failed to fetch templates from Meta. Please check your WhatsApp Business account credentials and permissions.",
         502,
       );
     }
@@ -290,13 +317,23 @@ export async function syncWorkspaceTemplates(
 
     let accessToken: string;
     try {
-      accessToken = decrypt(account.accessTokenEncrypted);
+      if (account.accessTokenEncrypted) {
+        accessToken = decrypt(account.accessTokenEncrypted);
+      } else if (whatsappConfig.systemUserAccessToken) {
+        accessToken = whatsappConfig.systemUserAccessToken;
+      } else {
+        throw new Error("No access token found");
+      }
     } catch {
-      errors.push({
-        message: `Failed to decrypt WhatsApp access token for account ${account.businessName}`,
-        statusCode: 500,
-      });
-      continue;
+      if (whatsappConfig.systemUserAccessToken) {
+        accessToken = whatsappConfig.systemUserAccessToken;
+      } else {
+        errors.push({
+          message: `Failed to decrypt WhatsApp access token for account ${account.businessName}`,
+          statusCode: 500,
+        });
+        continue;
+      }
     }
 
     let metaTemplates: MetaRawTemplate[];
@@ -358,7 +395,29 @@ export async function syncWorkspaceTemplates(
         }
       }
 
-      const variables = extractVariables(bodyText);
+      const safeBodyText = bodyText.trim() || item.name || "Template message";
+      const validStatuses = new Set([
+        "APPROVED",
+        "PENDING",
+        "REJECTED",
+        "PAUSED",
+        "DISABLED",
+        "IN_APPEAL",
+        "DELETED",
+        "DRAFT",
+      ]);
+      const rawStatusUpper = (item.status || "").toUpperCase();
+      const normalizedStatus = (validStatuses.has(rawStatusUpper)
+        ? rawStatusUpper
+        : "PENDING") as MetaTemplateStatus;
+
+      const validCategories = new Set(["MARKETING", "UTILITY", "AUTHENTICATION"]);
+      const rawCategoryUpper = (item.category || "").toUpperCase();
+      const normalizedCategory = (validCategories.has(rawCategoryUpper)
+        ? rawCategoryUpper
+        : "MARKETING") as MetaTemplateCategory;
+
+      const variables = extractVariables(safeBodyText);
 
       const updated = await WhatsAppTemplate.findOneAndUpdate(
         {
@@ -369,11 +428,11 @@ export async function syncWorkspaceTemplates(
           $set: {
             whatsappAccountId: account._id,
             name: item.name,
-            category: item.category,
+            category: normalizedCategory,
             language: item.language,
-            status: item.status,
+            status: normalizedStatus,
             header,
-            body: bodyText,
+            body: safeBodyText,
             footer: footerText,
             buttons,
             variables,

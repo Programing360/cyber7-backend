@@ -41,6 +41,11 @@ import {
   getWhatsAppMediaStreamController,
   sendWhatsAppMediaMessageController,
 } from "./modules/whatsapp/whatsapp.controller.js";
+import {
+  listTemplatesController,
+  getTemplateByIdController,
+  syncTemplatesController,
+} from "./modules/whatsapp/template.controller.js";
 import { authenticate } from "./middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "./middlewares/require-workspace-membership.js";
 import { requireRole } from "./middlewares/require-role.js";
@@ -182,6 +187,29 @@ app.post(
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   sendWhatsAppMediaMessageController,
+);
+
+// WhatsApp Message Templates (Direct and Workspace-scoped)
+app.get(
+  "/api/workspaces/:workspaceId/whatsapp/templates",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  listTemplatesController,
+);
+app.post(
+  "/api/workspaces/:workspaceId/whatsapp/templates/sync",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  syncTemplatesController,
+);
+app.get(
+  "/api/workspaces/:workspaceId/whatsapp/templates/:templateId",
+  authenticate,
+  requireWorkspaceMembership,
+  requireRole("OWNER", "ADMIN", "AGENT"),
+  getTemplateByIdController,
 );
 // Register router with workspace prefix
 app.use("/api/workspaces/:workspaceId/automations", automationRoutes);
