@@ -1021,34 +1021,31 @@ export const initCallSocket = (io: CallSocketServer): void => {
             await terminateMetaCall(phoneId, metaCallId, token);
           }
 
-          const isAnswered =
-            call.status === "CONNECTED" ||
-            Boolean(call.answeredAt) ||
-            Boolean(call.durationSeconds && call.durationSeconds > 0);
+          const wasAnswered = Boolean(call.answeredAt);
 
           call.endedAt = new Date();
-          if (isAnswered) {
+          if (wasAnswered) {
             call.status = "ENDED";
-            if (!call.durationSeconds || call.durationSeconds <= 0) {
-              const startTime = call.answeredAt
-                ? new Date(call.answeredAt).getTime()
-                : new Date(call.startedAt).getTime();
-              call.durationSeconds = Math.max(
-                1,
-                Math.round((call.endedAt.getTime() - startTime) / 1000),
-              );
-            }
+            const startTime = new Date(call.answeredAt!).getTime();
+            call.durationSeconds = Math.max(
+              1,
+              Math.round((call.endedAt.getTime() - startTime) / 1000),
+            );
           } else {
             const isRinging =
               call.status === "RINGING" || call.status === "ASSIGNING";
-            call.status = isRinging ? "CANCELLED" : "ENDED";
+            call.status = isRinging
+              ? "CANCELLED"
+              : call.callType === "OUTGOING"
+                ? "CANCELLED"
+                : "MISSED";
             call.durationSeconds = 0;
           }
           await call.save();
 
           // Generate or update unified call log bubble in chat
           await createCallEndMessage(call._id, {
-            forceCompleted: isAnswered,
+            forceCompleted: wasAnswered,
             durationSeconds: call.durationSeconds,
           });
 
@@ -1056,7 +1053,7 @@ export const initCallSocket = (io: CallSocketServer): void => {
             notificationId: metaCallId || call._id.toString(),
             workspaceId: data.workspaceId,
             callId: metaCallId || call._id.toString(),
-            status: (isAnswered ? "ENDED" : "CANCELLED") as "ENDED" | "CANCELLED",
+            status: (wasAnswered ? "ENDED" : "CANCELLED") as "ENDED" | "CANCELLED",
           };
 
           io.to(data.workspaceId).emit("incoming-call-ended", endData);

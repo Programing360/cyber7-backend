@@ -1046,36 +1046,19 @@ async function processTerminateEvent(
     reason === "rejected" ||
     reason === "declined";
 
-  const isAnswered =
+  const isCancelled =
+    metaStatus === "CANCELED" ||
+    metaStatus === "CANCELLED" ||
+    reason === "canceled" ||
+    reason === "cancelled" ||
+    reason === "timeout";
+
+  // A call was answered ONLY if explicitly confirmed answered by recipient
+  const hasAnsweredTimestamp = Boolean(existingCall?.answeredAt);
+  const wasAnswered =
     isAnsweredElsewhere ||
-    (duration !== undefined && duration > 0) ||
-    existingCall?.status === "CONNECTED" ||
-    Boolean((existingCall as any)?.answeredAt) ||
-    (metaStatus === "COMPLETED" && (duration === undefined || duration > 0));
-
-  const isUnanswered =
-    !isAnsweredElsewhere &&
-    !isAnswered &&
-    !isRejected &&
-    (metaStatus === "NO_ANSWER" ||
-      metaStatus === "CANCELED" ||
-      metaStatus === "CANCELLED" ||
-      reason === "timeout" ||
-      duration === 0 ||
-      duration === undefined);
-
-  const callType: CallType =
-    direction === "USER_INITIATED" && isUnanswered
-      ? "MISSED"
-      : getCallType(direction);
-
-  const endStatus: "MISSED" | "REJECTED" | "ENDED" | "CANCELLED" = isRejected
-    ? "REJECTED"
-    : isAnswered || isAnsweredElsewhere
-      ? "ENDED"
-      : metaStatus === "CANCELED" || metaStatus === "CANCELLED"
-        ? "CANCELLED"
-        : "MISSED";
+    hasAnsweredTimestamp ||
+    (existingCall?.status === "CONNECTED" && duration !== undefined && duration > 0);
 
   const endedAt =
     parseMetaDate(event.end_time) ??
@@ -1088,6 +1071,39 @@ async function processTerminateEvent(
     parseMetaDate(event.timestamp) ??
     endedAt;
 
+  // Strict Duration Invariant:
+  // If call was never answered, duration MUST be 0 (never calculate endedAt - startedAt ringing time).
+  // If answered, duration is calculated from endedAt - answeredAt.
+  const calculatedDuration =
+    wasAnswered
+      ? duration !== undefined && duration > 0
+        ? duration
+        : existingCall?.answeredAt
+          ? Math.max(
+              1,
+              Math.floor(
+                (endedAt.getTime() - new Date(existingCall.answeredAt).getTime()) /
+                  1000,
+              ),
+            )
+          : 0
+      : 0;
+
+  const isUnanswered = !wasAnswered;
+
+  const callType: CallType =
+    direction === "USER_INITIATED" && isUnanswered
+      ? "MISSED"
+      : getCallType(direction);
+
+  const endStatus: "MISSED" | "REJECTED" | "ENDED" | "CANCELLED" = isRejected
+    ? "REJECTED"
+    : wasAnswered
+      ? "ENDED"
+      : isCancelled || direction === "BUSINESS_INITIATED"
+        ? "CANCELLED"
+        : "MISSED";
+
   const identity: CallIdentity = {
     callId,
     phoneNumber: resolvedPhoneNumber,
@@ -1099,19 +1115,6 @@ async function processTerminateEvent(
   };
 
   const { callLogId } = await ensureCallLog(workspaceId, identity);
-
-  const calculatedDuration =
-    duration !== undefined
-      ? duration
-      : isAnswered && existingCall?.startedAt
-        ? Math.max(
-            1,
-            Math.round(
-              (endedAt.getTime() - new Date(existingCall.startedAt).getTime()) /
-                1000,
-            ),
-          )
-        : 0;
 
   const update: Record<string, unknown> = {
     status: endStatus === "CANCELLED" ? "CANCELLED" : endStatus,
@@ -1243,7 +1246,7 @@ async function processTerminateEvent(
 
   // Create or update chat history message bubble & notify inbox
   await createCallEndMessage(callLogId, {
-    forceCompleted: isAnswered,
+    forceCompleted: wasAnswered,
     durationSeconds: calculatedDuration,
   });
 

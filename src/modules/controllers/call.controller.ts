@@ -436,15 +436,18 @@ export const endCallSession = async (
     }
 
     const now = new Date();
+    const wasAnswered = Boolean(call.answeredAt);
     const finalDuration =
-      duration !== undefined
-        ? Math.floor(duration)
-        : call.startedAt
-          ? Math.max(
-              0,
-              Math.floor((now.getTime() - call.startedAt.getTime()) / 1000),
+      wasAnswered
+        ? duration !== undefined && duration > 0
+          ? Math.floor(duration)
+          : Math.max(
+              1,
+              Math.floor(
+                (now.getTime() - new Date(call.answeredAt!).getTime()) / 1000,
+              ),
             )
-          : 0;
+        : 0;
 
     // মেটাতে টার্মিনেশন রিকোয়েস্ট পাঠানো (যদি কলটি এখনও সক্রিয় থাকে)
     if (call.providerCallId) {
@@ -508,21 +511,18 @@ export const endCallSession = async (
     call.status =
       status === "REJECTED"
         ? "REJECTED"
-        : status === "CANCELLED"
-          ? "CANCELLED"
-          : "ENDED";
+        : wasAnswered
+          ? "ENDED"
+          : status === "CANCELLED" || call.callType === "OUTGOING"
+            ? "CANCELLED"
+            : "MISSED";
     call.endedAt = now;
     call.durationSeconds = finalDuration;
     await call.save();
 
     // Automatically generate and broadcast chat call log bubble (upserts single record)
-    const isAnswered =
-      finalDuration > 0 ||
-      call.status === "ENDED" ||
-      Boolean(call.answeredAt);
-
     await createCallEndMessage(call._id, {
-      forceCompleted: isAnswered,
+      forceCompleted: wasAnswered,
       durationSeconds: finalDuration,
     });
 

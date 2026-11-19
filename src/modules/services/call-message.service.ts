@@ -121,46 +121,47 @@ export async function createCallEndMessage(
     });
 
     // 3. Compute accurate duration and answered status
-    const calculatedDuration =
-      options?.durationSeconds !== undefined && options.durationSeconds > 0
-        ? options.durationSeconds
-        : (call.durationSeconds ?? 0) > 0
-          ? call.durationSeconds
-          : call.answeredAt && call.endedAt
-            ? Math.max(
-                0,
-                Math.round(
-                  (new Date(call.endedAt).getTime() -
-                    new Date(call.answeredAt).getTime()) /
-                    1000,
-                ),
-              )
-            : 0;
+    const hasAnsweredTimestamp = Boolean(call.answeredAt || (call as any).connectedAt);
+    const hasExplicitDuration =
+      (options?.durationSeconds !== undefined && options.durationSeconds > 0) ||
+      ((call.durationSeconds ?? 0) > 0);
 
     const isExplicitlyAnswered =
-      Boolean(options?.forceCompleted) ||
-      call.status === "CONNECTED" ||
-      call.status === "ENDED" ||
-      calculatedDuration > 0 ||
-      Boolean(call.answeredAt) ||
-      Boolean((call as any).connectedAt);
+      hasAnsweredTimestamp ||
+      (Boolean(options?.forceCompleted) && hasExplicitDuration) ||
+      (call.status === "ENDED" && hasExplicitDuration);
 
-    const isCancelled =
-      call.status === "CANCELLED" &&
-      !call.answeredAt &&
-      calculatedDuration === 0;
+    const calculatedDuration =
+      isExplicitlyAnswered
+        ? options?.durationSeconds !== undefined && options.durationSeconds > 0
+          ? options.durationSeconds
+          : (call.durationSeconds ?? 0) > 0
+            ? call.durationSeconds
+            : call.answeredAt && call.endedAt
+              ? Math.max(
+                  1,
+                  Math.round(
+                    (new Date(call.endedAt).getTime() -
+                      new Date(call.answeredAt).getTime()) /
+                      1000,
+                  ),
+                )
+              : 0
+        : 0;
 
     const isRejected =
-      call.status === "REJECTED" &&
-      !call.answeredAt &&
-      calculatedDuration === 0;
+      call.status === "REJECTED" && !isExplicitlyAnswered;
 
-    const isMissed = isCancelled || isRejected || !isExplicitlyAnswered;
+    const isCancelled =
+      (call.status === "CANCELLED" || (call as any).status === "CANCELED") &&
+      !isExplicitlyAnswered;
+
+    const isMissed = !isExplicitlyAnswered || isCancelled || isRejected;
 
     let text: string;
     let msgType: "voice_call" | "missed_call";
 
-    if (!isMissed) {
+    if (!isMissed && calculatedDuration > 0) {
       msgType = "voice_call";
       text = `Voice call • ${formatCallDuration(calculatedDuration)}`;
     } else if (isRejected) {

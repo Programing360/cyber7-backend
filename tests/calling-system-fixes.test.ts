@@ -218,6 +218,83 @@ describe("WebRTC WhatsApp Calling & Chat System Fixes Test Suite", () => {
       }
     });
 
+    it("should create an 'Unanswered voice call' missed_call message with no duration for unanswered outgoing calls", async () => {
+      const unansweredCallId = new mongoose.Types.ObjectId();
+      const mockCall = {
+        _id: unansweredCallId,
+        workspaceId,
+        phoneNumber: testPhone,
+        callType: "OUTGOING",
+        status: "CANCELLED",
+        durationSeconds: 0,
+        startedAt: new Date(Date.now() - 21000), // rang for 21 seconds
+        endedAt: new Date(),
+        answeredAt: undefined, // Never answered!
+      };
+
+      const originalCallFindById = CallLog.findById;
+      const originalContactFindOne = WhatsAppContact.findOne;
+      const originalAccountFindOne = WhatsAppAccount.findOne;
+      const originalConvFindOne = WhatsAppConversation.findOne;
+      const originalMessageCreate = WhatsAppMessage.create;
+      const originalMessageFindOne = WhatsAppMessage.findOne;
+
+      let createdMessagePayload: any = null;
+
+      try {
+        CallLog.findById = (() => Promise.resolve(mockCall)) as any;
+        WhatsAppMessage.findOne = (() => Promise.resolve(null)) as any;
+
+        WhatsAppContact.findOne = (() =>
+          Promise.resolve({
+            _id: contactId,
+            workspaceId,
+            phoneNumber: testPhone,
+          })) as any;
+
+        WhatsAppAccount.findOne = (() =>
+          Promise.resolve({
+            _id: accountId,
+            workspaceId,
+            status: "CONNECTED",
+          })) as any;
+
+        const mockConvDoc = {
+          _id: conversationId,
+          workspaceId,
+          contactId,
+          whatsappAccountId: accountId,
+          lastMessageAt: new Date(),
+          save: async () => mockConvDoc,
+        };
+
+        WhatsAppConversation.findOne = (() => Promise.resolve(mockConvDoc)) as any;
+
+        WhatsAppMessage.create = ((payload: any) => {
+          createdMessagePayload = payload;
+          return Promise.resolve({
+            ...payload,
+            _id: new mongoose.Types.ObjectId(),
+            timestamp: payload.timestamp || new Date(),
+          });
+        }) as any;
+
+        await createCallEndMessage(unansweredCallId);
+
+        assert.ok(createdMessagePayload, "A message should be created");
+        assert.equal(createdMessagePayload.type, "missed_call");
+        assert.equal(createdMessagePayload.direction, "OUTBOUND");
+        assert.equal(createdMessagePayload.text, "Cancelled voice call");
+      } finally {
+        CallLog.findById = originalCallFindById;
+        WhatsAppContact.findOne = originalContactFindOne;
+        WhatsAppAccount.findOne = originalAccountFindOne;
+        WhatsAppConversation.findOne = originalConvFindOne;
+        WhatsAppMessage.create = originalMessageCreate;
+        WhatsAppMessage.findOne = originalMessageFindOne;
+      }
+    });
+
     it("should update existing message in-place instead of creating duplicate when message already exists", async () => {
       const activeCallId = new mongoose.Types.ObjectId();
       const mockCall = {
