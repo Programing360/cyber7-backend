@@ -778,41 +778,213 @@ async function processConnectEvent(
       .lean();
 
     const assignedTo = call?.assignedTo?.toString();
+    const io = getCallSocketIO();
 
-    if (assignedTo) {
-      const io = getCallSocketIO();
+    if (io) {
+      const sdpPayload = {
+        workspaceId: wsId,
+        callId,
+        sdp: {
+          type: "answer" as const,
+          sdp: event.session.sdp,
+        },
+      };
 
-      if (io) {
-        io.to(`user_${assignedTo}`).emit("webrtc-answer", {
-          workspaceId: wsId,
-          callId,
-          sdp: {
-            type: "answer",
-            sdp: event.session.sdp,
-          },
-        });
+      const ringingPayload = {
+        workspaceId: wsId,
+        callId,
+      };
 
-        io.to(`user_${assignedTo}`).emit("call-accepted", {
-          workspaceId: wsId,
-          callId,
-          assignedTo,
-        });
-
-        io.to(`user_${assignedTo}`).emit("call:accepted" as any, {
-          workspaceId: wsId,
-          callId,
-          assignedTo,
-        });
-
-        await updateNonTerminalCall(workspaceId, callId, {
-          status: "CONNECTED",
-          answeredAt: new Date(),
-        });
+      if (assignedTo) {
+        io.to(`user_${assignedTo}`).emit("webrtc-answer", sdpPayload);
+        io.to(`user_${assignedTo}`).emit("call:ringing" as any, ringingPayload);
+        io.to(`user_${assignedTo}`).emit("call-ringing" as any, ringingPayload);
       }
+      io.to(wsId).emit("webrtc-answer", sdpPayload);
+      io.to(`workspace_${wsId}`).emit("webrtc-answer", sdpPayload);
+      io.to(wsId).emit("call:ringing" as any, ringingPayload);
+      io.to(`workspace_${wsId}`).emit("call:ringing" as any, ringingPayload);
     }
   }
 
   logEvent("Outgoing connect event processed", { callId });
+}
+
+async function processRingingEvent(
+  workspaceId: Types.ObjectId,
+  event: WhatsAppCallEvent,
+  phoneNumberId?: string,
+): Promise<void> {
+  const callId = normalizeString(event.id);
+  if (!callId) return;
+
+  const wsId = workspaceId.toString();
+  const io = getCallSocketIO();
+
+  await updateNonTerminalCall(workspaceId, callId, {
+    status: "RINGING",
+  });
+
+  const call = await CallLog.findOne({
+    workspaceId,
+    providerCallId: callId,
+  })
+    .select("assignedTo")
+    .lean();
+
+  if (io) {
+    const ringingData = { workspaceId: wsId, callId };
+    io.to(wsId).emit("call:ringing" as any, ringingData);
+    io.to(`workspace_${wsId}`).emit("call:ringing" as any, ringingData);
+    if (call?.assignedTo) {
+      io.to(`user_${call.assignedTo.toString()}`).emit(
+        "call:ringing" as any,
+        ringingData,
+      );
+      io.to(`user_${call.assignedTo.toString()}`).emit(
+        "call-ringing" as any,
+        ringingData,
+      );
+    }
+  }
+
+  logEvent("Call ringing event processed", { callId });
+}
+
+async function processCallAcceptedEvent(
+  workspaceId: Types.ObjectId,
+  event: WhatsAppCallEvent,
+  phoneNumberId?: string,
+): Promise<void> {
+  const callId = normalizeString(event.id);
+  if (!callId) return;
+
+  const wsId = workspaceId.toString();
+  const io = getCallSocketIO();
+
+  const call = await CallLog.findOne({
+    workspaceId,
+    providerCallId: callId,
+  })
+    .select("_id callType assignedTo ringingUserIds")
+    .lean();
+
+  const answeredAt = parseMetaDate(event.timestamp) ?? new Date();
+
+  if (call?.callType === "OUTGOING") {
+    await updateNonTerminalCall(workspaceId, callId, {
+      status: "CONNECTED",
+      answeredAt,
+    });
+
+    const assignedTo = call.assignedTo?.toString() || "";
+
+    if (io) {
+      const acceptedData = {
+        workspaceId: wsId,
+        callId,
+        assignedTo,
+      };
+
+      if (assignedTo) {
+        io.to(`user_${assignedTo}`).emit("call-accepted", acceptedData);
+        io.to(`user_${assignedTo}`).emit("call:accepted" as any, acceptedData);
+        io.to(`user_${assignedTo}`).emit("call:connected" as any, acceptedData);
+        io.to(`user_${assignedTo}`).emit("call-connected" as any, acceptedData);
+      }
+      io.to(wsId).emit("call-accepted", acceptedData);
+      io.to(`workspace_${wsId}`).emit("call-accepted", acceptedData);
+      io.to(`workspace_${wsId}`).emit("call:connected" as any, acceptedData);
+    }
+
+    logEvent("Outgoing call accepted", { callId, assignedTo });
+    return;
+  }
+
+  // Incoming call accepted:
+  if (call?.callType === "INCOMING") {
+    if (call.assignedTo) {
+      await updateNonTerminalCall(workspaceId, callId, {
+        status: "CONNECTED",
+        answeredAt,
+      });
+
+      const assignedTo = call.assignedTo.toString();
+      if (io) {
+        const acceptedData = {
+          workspaceId: wsId,
+          callId,
+          assignedTo,
+        };
+        io.to(`user_${assignedTo}`).emit("call-accepted", acceptedData);
+        io.to(`user_${assignedTo}`).emit("call:connected" as any, acceptedData);
+      }
+    } else {
+      // Incoming call accepted on mobile device!
+      await updateNonTerminalCall(workspaceId, callId, {
+        status: "ENDED",
+        answeredAt,
+      });
+
+      if (io) {
+        const answeredElsewhereData = {
+          workspaceId: wsId,
+          callId,
+          reason: "answered_elsewhere",
+        };
+        io.to(wsId).emit("call:answered_elsewhere" as any, answeredElsewhereData);
+        io.to(`workspace_${wsId}`).emit(
+          "call:answered_elsewhere" as any,
+          answeredElsewhereData,
+        );
+        io.to(wsId).emit("call-taken", {
+          workspaceId: wsId,
+          callId,
+          assignedTo: "mobile",
+        });
+        io.to(`workspace_${wsId}`).emit("call-taken", {
+          workspaceId: wsId,
+          callId,
+          assignedTo: "mobile",
+        });
+        io.to(wsId).emit("incoming-call-ended", {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: "ENDED",
+        });
+        io.to(`workspace_${wsId}`).emit("incoming-call-ended", {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: "ENDED",
+        });
+
+        for (const uid of call.ringingUserIds ?? []) {
+          io.to(`user_${uid.toString()}`).emit(
+            "call:answered_elsewhere" as any,
+            answeredElsewhereData,
+          );
+          io.to(`user_${uid.toString()}`).emit("call-taken", {
+            workspaceId: wsId,
+            callId,
+            assignedTo: "mobile",
+          });
+          io.to(`user_${uid.toString()}`).emit("incoming-call-ended", {
+            notificationId: callId,
+            workspaceId: wsId,
+            callId,
+            status: "ENDED",
+          });
+        }
+      }
+
+      await createCallEndMessage(call._id, { forceCompleted: true });
+      logEvent("Incoming call answered on mobile device (ACCEPTED event)", {
+        callId,
+      });
+    }
+  }
 }
 
 async function processTerminateEvent(
@@ -857,23 +1029,38 @@ async function processTerminateEvent(
       : (existingCall?.callerName ?? "Unknown");
 
   const metaStatus = normalizeString(event.status)?.toUpperCase();
+  const reason = normalizeString(event.reason)?.toLowerCase() || "";
   const duration = normalizeDuration(event.duration);
 
-  const isRejected = metaStatus === "REJECTED";
+  const isAnsweredElsewhere =
+    reason.includes("elsewhere") ||
+    reason.includes("claimed") ||
+    reason === "accepted_elsewhere" ||
+    reason === "answered_elsewhere" ||
+    metaStatus === "ACCEPTED_ELSEWHERE" ||
+    metaStatus === "ANSWERED_ELSEWHERE" ||
+    metaStatus === "CONNECTED_ELSEWHERE";
+
+  const isRejected =
+    metaStatus === "REJECTED" ||
+    reason === "rejected" ||
+    reason === "declined";
 
   const isAnswered =
+    isAnsweredElsewhere ||
     (duration !== undefined && duration > 0) ||
     existingCall?.status === "CONNECTED" ||
     Boolean((existingCall as any)?.answeredAt) ||
     (metaStatus === "COMPLETED" && (duration === undefined || duration > 0));
 
   const isUnanswered =
+    !isAnsweredElsewhere &&
     !isAnswered &&
     !isRejected &&
     (metaStatus === "NO_ANSWER" ||
       metaStatus === "CANCELED" ||
       metaStatus === "CANCELLED" ||
-      event.reason === "timeout" ||
+      reason === "timeout" ||
       duration === 0 ||
       duration === undefined);
 
@@ -884,7 +1071,7 @@ async function processTerminateEvent(
 
   const endStatus: "MISSED" | "REJECTED" | "ENDED" | "CANCELLED" = isRejected
     ? "REJECTED"
-    : isAnswered
+    : isAnswered || isAnsweredElsewhere
       ? "ENDED"
       : metaStatus === "CANCELED" || metaStatus === "CANCELLED"
         ? "CANCELLED"
@@ -933,6 +1120,7 @@ async function processTerminateEvent(
     callerName,
     phoneNumber: resolvedPhoneNumber,
     durationSeconds: calculatedDuration,
+    ...(isAnsweredElsewhere && !existingCall?.answeredAt ? { answeredAt: endedAt } : {}),
   };
 
   await CallLog.updateOne(
@@ -950,9 +1138,78 @@ async function processTerminateEvent(
   );
 
   const wsId = workspaceId.toString();
+  const io = getCallSocketIO();
 
   if (direction === "USER_INITIATED") {
     const recipientUserIds = existingCall?.ringingUserIds ?? [];
+
+    if (isAnsweredElsewhere) {
+      if (io) {
+        const answeredElsewhereData = {
+          workspaceId: wsId,
+          callId,
+          reason: "answered_elsewhere",
+        };
+        io.to(wsId).emit("call:answered_elsewhere" as any, answeredElsewhereData);
+        io.to(`workspace_${wsId}`).emit(
+          "call:answered_elsewhere" as any,
+          answeredElsewhereData,
+        );
+        io.to(wsId).emit("call-taken", {
+          workspaceId: wsId,
+          callId,
+          assignedTo: "mobile",
+        });
+        io.to(`workspace_${wsId}`).emit("call-taken", {
+          workspaceId: wsId,
+          callId,
+          assignedTo: "mobile",
+        });
+        io.to(wsId).emit("incoming-call-ended", {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: "ENDED",
+        });
+        io.to(`workspace_${wsId}`).emit("incoming-call-ended", {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: "ENDED",
+        });
+        for (const uid of recipientUserIds) {
+          io.to(`user_${uid.toString()}`).emit(
+            "call:answered_elsewhere" as any,
+            answeredElsewhereData,
+          );
+          io.to(`user_${uid.toString()}`).emit("call-taken", {
+            workspaceId: wsId,
+            callId,
+            assignedTo: "mobile",
+          });
+          io.to(`user_${uid.toString()}`).emit("incoming-call-ended", {
+            notificationId: callId,
+            workspaceId: wsId,
+            callId,
+            status: "ENDED",
+          });
+        }
+      }
+    } else {
+      if (io) {
+        const termPayload = {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: endStatus,
+        };
+        io.to(wsId).emit("incoming-call-ended", termPayload);
+        io.to(`workspace_${wsId}`).emit("incoming-call-ended", termPayload);
+        for (const uid of recipientUserIds) {
+          io.to(`user_${uid.toString()}`).emit("incoming-call-ended", termPayload);
+        }
+      }
+    }
 
     await enqueueCallEndedNotifications({
       workspaceId,
@@ -965,18 +1222,23 @@ async function processTerminateEvent(
         endStatus: endStatus === "CANCELLED" ? "MISSED" : endStatus,
       },
     });
-  } else if (existingCall?.assignedTo) {
-    const io = getCallSocketIO();
-
-    io?.to(`user_${existingCall.assignedTo.toString()}`).emit(
-      "incoming-call-ended",
-      {
+  } else {
+    if (io) {
+      const termPayload = {
         notificationId: callId,
         workspaceId: wsId,
         callId,
         status: endStatus,
-      },
-    );
+      };
+      io.to(wsId).emit("incoming-call-ended", termPayload);
+      io.to(`workspace_${wsId}`).emit("incoming-call-ended", termPayload);
+      if (existingCall?.assignedTo) {
+        io.to(`user_${existingCall.assignedTo.toString()}`).emit(
+          "incoming-call-ended",
+          termPayload,
+        );
+      }
+    }
   }
 
   // Create or update chat history message bubble & notify inbox
@@ -1015,31 +1277,19 @@ async function processCallStatus(
   if (status === "RINGING") {
     const recipient = normalizeString(statusEvent.recipient_id);
 
-    if (!recipient) {
-      logInvalidEvent("RINGING event has no recipient ID");
-      return;
+    if (recipient) {
+      await ensureCallLog(workspaceId, {
+        callId,
+        phoneNumber: recipient,
+        callerName: "Unknown",
+        callType: "OUTGOING",
+        startedAt: timestamp,
+        phoneNumberId,
+      });
     }
-
-    await ensureCallLog(workspaceId, {
-      callId,
-      phoneNumber: recipient,
-      callerName: "Unknown",
-      callType: "OUTGOING",
-      startedAt: timestamp,
-      phoneNumberId,
-    });
 
     await updateNonTerminalCall(workspaceId, callId, {
       status: "RINGING",
-    });
-
-    return;
-  }
-
-  if (status === "ACCEPTED") {
-    await updateNonTerminalCall(workspaceId, callId, {
-      status: "CONNECTED",
-      answeredAt: new Date(),
     });
 
     const call = await CallLog.findOne({
@@ -1049,23 +1299,225 @@ async function processCallStatus(
       .select("assignedTo")
       .lean();
 
-    if (call?.assignedTo) {
-      const io = getCallSocketIO();
-
-      io?.to(`user_${call.assignedTo.toString()}`).emit("call-accepted", {
-        workspaceId: wsId,
-        callId,
-        assignedTo: call.assignedTo.toString(),
-      });
-      io?.to(`user_${call.assignedTo.toString()}`).emit("call:accepted" as any, {
-        workspaceId: wsId,
-        callId,
-        assignedTo: call.assignedTo.toString(),
-      });
+    if (io) {
+      const ringingData = { workspaceId: wsId, callId };
+      io.to(wsId).emit("call:ringing" as any, ringingData);
+      io.to(`workspace_${wsId}`).emit("call:ringing" as any, ringingData);
+      if (call?.assignedTo) {
+        io.to(`user_${call.assignedTo.toString()}`).emit(
+          "call:ringing" as any,
+          ringingData,
+        );
+        io.to(`user_${call.assignedTo.toString()}`).emit(
+          "call-ringing" as any,
+          ringingData,
+        );
+      }
     }
 
-    logEvent("Outgoing call accepted", { callId });
+    logEvent("Call status RINGING processed", { callId });
+    return;
+  }
 
+  if (status === "ACCEPTED" || status === "CONNECTED") {
+    const call = await CallLog.findOne({
+      workspaceId,
+      providerCallId: callId,
+    })
+      .select("_id callType assignedTo ringingUserIds")
+      .lean();
+
+    if (call?.callType === "OUTGOING") {
+      await updateNonTerminalCall(workspaceId, callId, {
+        status: "CONNECTED",
+        answeredAt: new Date(),
+      });
+
+      const assignedTo = call.assignedTo?.toString() || "";
+
+      if (io) {
+        const acceptedData = {
+          workspaceId: wsId,
+          callId,
+          assignedTo,
+        };
+
+        if (assignedTo) {
+          io.to(`user_${assignedTo}`).emit("call-accepted", acceptedData);
+          io.to(`user_${assignedTo}`).emit("call:accepted" as any, acceptedData);
+          io.to(`user_${assignedTo}`).emit("call:connected" as any, acceptedData);
+          io.to(`user_${assignedTo}`).emit("call-connected" as any, acceptedData);
+        }
+        io.to(wsId).emit("call-accepted", acceptedData);
+        io.to(`workspace_${wsId}`).emit("call-accepted", acceptedData);
+        io.to(`workspace_${wsId}`).emit("call:connected" as any, acceptedData);
+      }
+
+      logEvent("Outgoing call accepted", { callId, assignedTo });
+      return;
+    }
+
+    if (call?.callType === "INCOMING") {
+      if (call.assignedTo) {
+        await updateNonTerminalCall(workspaceId, callId, {
+          status: "CONNECTED",
+          answeredAt: new Date(),
+        });
+
+        const assignedTo = call.assignedTo.toString();
+        if (io) {
+          const acceptedData = {
+            workspaceId: wsId,
+            callId,
+            assignedTo,
+          };
+          io.to(`user_${assignedTo}`).emit("call-accepted", acceptedData);
+          io.to(`user_${assignedTo}`).emit("call:connected" as any, acceptedData);
+        }
+      } else {
+        // Incoming call answered on mobile device!
+        await updateNonTerminalCall(workspaceId, callId, {
+          status: "ENDED",
+          answeredAt: new Date(),
+        });
+
+        if (io) {
+          const answeredElsewhereData = {
+            workspaceId: wsId,
+            callId,
+            reason: "answered_elsewhere",
+          };
+          io.to(wsId).emit("call:answered_elsewhere" as any, answeredElsewhereData);
+          io.to(`workspace_${wsId}`).emit(
+            "call:answered_elsewhere" as any,
+            answeredElsewhereData,
+          );
+          io.to(wsId).emit("call-taken", {
+            workspaceId: wsId,
+            callId,
+            assignedTo: "mobile",
+          });
+          io.to(`workspace_${wsId}`).emit("call-taken", {
+            workspaceId: wsId,
+            callId,
+            assignedTo: "mobile",
+          });
+          io.to(wsId).emit("incoming-call-ended", {
+            notificationId: callId,
+            workspaceId: wsId,
+            callId,
+            status: "ENDED",
+          });
+          io.to(`workspace_${wsId}`).emit("incoming-call-ended", {
+            notificationId: callId,
+            workspaceId: wsId,
+            callId,
+            status: "ENDED",
+          });
+
+          for (const uid of call.ringingUserIds ?? []) {
+            io.to(`user_${uid.toString()}`).emit(
+              "call:answered_elsewhere" as any,
+              answeredElsewhereData,
+            );
+            io.to(`user_${uid.toString()}`).emit("call-taken", {
+              workspaceId: wsId,
+              callId,
+              assignedTo: "mobile",
+            });
+            io.to(`user_${uid.toString()}`).emit("incoming-call-ended", {
+              notificationId: callId,
+              workspaceId: wsId,
+              callId,
+              status: "ENDED",
+            });
+          }
+        }
+
+        await createCallEndMessage(call._id, { forceCompleted: true });
+        logEvent("Incoming call answered on mobile device (ACCEPTED status)", {
+          callId,
+        });
+      }
+      return;
+    }
+  }
+
+  if (
+    status === "ACCEPTED_ELSEWHERE" ||
+    status === "ANSWERED_ELSEWHERE" ||
+    status === "CONNECTED_ELSEWHERE"
+  ) {
+    const call = await CallLog.findOne({
+      workspaceId,
+      providerCallId: callId,
+    })
+      .select("_id callType ringingUserIds")
+      .lean();
+
+    await updateNonTerminalCall(workspaceId, callId, {
+      status: "ENDED",
+      answeredAt: new Date(),
+    });
+
+    if (io) {
+      const answeredElsewhereData = {
+        workspaceId: wsId,
+        callId,
+        reason: "answered_elsewhere",
+      };
+      io.to(wsId).emit("call:answered_elsewhere" as any, answeredElsewhereData);
+      io.to(`workspace_${wsId}`).emit(
+        "call:answered_elsewhere" as any,
+        answeredElsewhereData,
+      );
+      io.to(wsId).emit("call-taken", {
+        workspaceId: wsId,
+        callId,
+        assignedTo: "mobile",
+      });
+      io.to(`workspace_${wsId}`).emit("call-taken", {
+        workspaceId: wsId,
+        callId,
+        assignedTo: "mobile",
+      });
+      io.to(wsId).emit("incoming-call-ended", {
+        notificationId: callId,
+        workspaceId: wsId,
+        callId,
+        status: "ENDED",
+      });
+      io.to(`workspace_${wsId}`).emit("incoming-call-ended", {
+        notificationId: callId,
+        workspaceId: wsId,
+        callId,
+        status: "ENDED",
+      });
+
+      for (const uid of call?.ringingUserIds ?? []) {
+        io.to(`user_${uid.toString()}`).emit(
+          "call:answered_elsewhere" as any,
+          answeredElsewhereData,
+        );
+        io.to(`user_${uid.toString()}`).emit("call-taken", {
+          workspaceId: wsId,
+          callId,
+          assignedTo: "mobile",
+        });
+        io.to(`user_${uid.toString()}`).emit("incoming-call-ended", {
+          notificationId: callId,
+          workspaceId: wsId,
+          callId,
+          status: "ENDED",
+        });
+      }
+    }
+
+    if (call?._id) {
+      await createCallEndMessage(call._id, { forceCompleted: true });
+    }
+
+    logEvent("Call answered elsewhere processed", { callId });
     return;
   }
 
@@ -1079,22 +1531,31 @@ async function processCallStatus(
       workspaceId,
       providerCallId: callId,
     })
-      .select("_id assignedTo")
+      .select("_id assignedTo ringingUserIds")
       .lean();
 
     if (call?._id) {
       await createCallEndMessage(call._id);
     }
 
-    if (call?.assignedTo) {
-      const io = getCallSocketIO();
-
-      io?.to(`user_${call.assignedTo.toString()}`).emit("incoming-call-ended", {
+    if (io) {
+      const rejPayload = {
         notificationId: callId,
         workspaceId: wsId,
         callId,
-        status: "REJECTED",
-      });
+        status: "REJECTED" as const,
+      };
+      io.to(wsId).emit("incoming-call-ended", rejPayload);
+      io.to(`workspace_${wsId}`).emit("incoming-call-ended", rejPayload);
+      if (call?.assignedTo) {
+        io.to(`user_${call.assignedTo.toString()}`).emit(
+          "incoming-call-ended",
+          rejPayload,
+        );
+      }
+      for (const uid of call?.ringingUserIds ?? []) {
+        io.to(`user_${uid.toString()}`).emit("incoming-call-ended", rejPayload);
+      }
     }
 
     return;
@@ -1102,68 +1563,6 @@ async function processCallStatus(
 
   logEvent("Unsupported call status ignored", { status });
 }
-
-// export async function processWhatsAppCallingWebhook(
-//   value: WhatsAppCallingWebhookValue,
-// ): Promise<void> {
-//   // console.log("hello");
-//   const phoneNumberId = normalizeString(value.metadata?.phone_number_id);
-//   // console.log(phoneNumberId);
-//   if (!phoneNumberId) {
-//     logInvalidEvent("Missing metadata.phone_number_id");
-//     return;
-//   }
-
-//   const account = await resolveWhatsAppAccount(phoneNumberId);
-
-//   if (!account) {
-//     logEvent(
-//       "No connected account or active workspace found for phone number ID",
-//       {
-//         phoneNumberId,
-//       },
-//     );
-//     return;
-//   }
-
-//   const contacts = value.contacts ?? [];
-
-//   for (const event of value.calls ?? []) {
-//     const eventName = normalizeString(event.event)?.toLowerCase();
-
-//     console.log(eventName);
-
-//     if (eventName === "connect") {
-//       await processConnectEvent(
-//         account.workspaceId,
-//         event,
-//         contacts,
-//         phoneNumberId,
-//       );
-//       continue;
-//     }
-
-//     if (eventName === "terminate") {
-//       await processTerminateEvent(
-//         account.workspaceId,
-//         event,
-//         contacts,
-//         phoneNumberId,
-//       );
-//       continue;
-//     }
-
-//     if (eventName) {
-//       logEvent("Unsupported call event ignored", { event: eventName });
-//     } else {
-//       logInvalidEvent("Call event has no event name");
-//     }
-//   }
-
-//   for (const statusEvent of value.statuses ?? []) {
-//     await processCallStatus(account.workspaceId, statusEvent, phoneNumberId);
-//   }
-// }
 
 export async function processWhatsAppCallingWebhook(
   value: WhatsAppCallingWebhookValue,
@@ -1205,6 +1604,28 @@ export async function processWhatsAppCallingWebhook(
         account.workspaceId,
         event,
         contacts,
+        phoneNumberId,
+      );
+      continue;
+    }
+
+    if (eventName === "ringing") {
+      await processRingingEvent(
+        account.workspaceId,
+        event,
+        phoneNumberId,
+      );
+      continue;
+    }
+
+    if (
+      eventName === "accepted" ||
+      eventName === "answered" ||
+      eventName === "connected"
+    ) {
+      await processCallAcceptedEvent(
+        account.workspaceId,
+        event,
         phoneNumberId,
       );
       continue;

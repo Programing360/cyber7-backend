@@ -351,14 +351,35 @@ export async function listWorkspaceConversations({
   const latestMessageMap = new Map<string, unknown>();
 
   if (conversationIds.length > 0) {
+    const targetWorkspaceObjectId = Types.ObjectId.isValid(workspaceId)
+      ? new Types.ObjectId(workspaceId)
+      : null;
+
+    const conversationObjectIds = conversationIds
+      .map((id) =>
+        Types.ObjectId.isValid(id.toString())
+          ? new Types.ObjectId(id.toString())
+          : null,
+      )
+      .filter(Boolean);
+    const conversationStringIds = conversationIds.map((id) => id.toString());
+    const allConversationIds = Array.from(
+      new Set([...conversationObjectIds, ...conversationStringIds]),
+    );
+
+    const workspaceMatchList: unknown[] = [workspaceId.toString()];
+    if (targetWorkspaceObjectId) {
+      workspaceMatchList.push(targetWorkspaceObjectId);
+    }
+
     const latestMessages = await WhatsAppMessage.aggregate([
       {
         $match: {
-          conversationId: { $in: conversationIds },
-          workspaceId: new Types.ObjectId(workspaceId),
+          conversationId: { $in: allConversationIds },
+          workspaceId: { $in: workspaceMatchList },
         },
       },
-      { $sort: { timestamp: -1 } },
+      { $sort: { timestamp: -1, createdAt: -1 } },
       {
         $group: {
           _id: "$conversationId",
@@ -370,6 +391,9 @@ export async function listWorkspaceConversations({
               direction: "$direction",
               status: "$status",
               timestamp: "$timestamp",
+              templateName: "$templateName",
+              mediaMimeType: "$mediaMimeType",
+              createdAt: "$createdAt",
             },
           },
         },
@@ -377,21 +401,32 @@ export async function listWorkspaceConversations({
     ]);
 
     for (const msg of latestMessages) {
-      latestMessageMap.set(msg._id.toString(), msg.lastMessage);
+      latestMessageMap.set(String(msg._id), msg.lastMessage);
     }
   }
 
-  const enrichedConversations = conversations.map((conv) => ({
-    ...conv,
-    lastMessage: latestMessageMap.get(conv._id.toString()) || null,
-    isCustomerServiceWindowActive: isCustomerServiceWindowOpen(
-      conv.lastCustomerMessageAt,
-    ),
-    customerServiceWindowExpiresAt:
-      getCustomerServiceWindowExpiry(
+  const enrichedConversations = conversations.map((conv) => {
+    const lastMsg: any =
+      latestMessageMap.get(conv._id.toString()) ||
+      (conv as any).lastMessage ||
+      null;
+
+    return {
+      ...conv,
+      lastMessage: lastMsg,
+      lastMessageText:
+        lastMsg?.text ||
+        lastMsg?.templateName ||
+        (lastMsg?.type ? `[${lastMsg.type}]` : undefined),
+      isCustomerServiceWindowActive: isCustomerServiceWindowOpen(
         conv.lastCustomerMessageAt,
-      )?.toISOString() ?? null,
-  }));
+      ),
+      customerServiceWindowExpiresAt:
+        getCustomerServiceWindowExpiry(
+          conv.lastCustomerMessageAt,
+        )?.toISOString() ?? null,
+    };
+  });
 
   return {
     conversations: enrichedConversations,

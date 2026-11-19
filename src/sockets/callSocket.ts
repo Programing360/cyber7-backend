@@ -52,6 +52,46 @@ export interface ServerToClientEvents {
     assignedTo: string;
   }) => void;
 
+  "call:ringing"?: (data: {
+    workspaceId: string;
+    callId: string;
+  }) => void;
+
+  "call-ringing"?: (data: {
+    workspaceId: string;
+    callId: string;
+  }) => void;
+
+  "call:connected"?: (data: {
+    workspaceId: string;
+    callId: string;
+    assignedTo?: string;
+  }) => void;
+
+  "call-connected"?: (data: {
+    workspaceId: string;
+    callId: string;
+    assignedTo?: string;
+  }) => void;
+
+  "call:answered_elsewhere"?: (data: {
+    workspaceId: string;
+    callId: string;
+    reason?: string;
+  }) => void;
+
+  "call-answered-elsewhere"?: (data: {
+    workspaceId: string;
+    callId: string;
+    reason?: string;
+  }) => void;
+
+  "call:ended"?: (data: {
+    workspaceId: string;
+    callId: string;
+    status?: string;
+  }) => void;
+
   "call-taken": (data: {
     workspaceId: string;
     callId: string;
