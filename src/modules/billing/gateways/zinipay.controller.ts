@@ -58,24 +58,20 @@ export async function initiateZinipayPaymentController(
 
     const cancelUrl =
       process.env.ZINIPAY_CANCEL_URL ||
-      `${frontendBase}/billing?payment_status=cancelled`;
+      `${frontendBase}/billing/callback?paymentId=${payment._id.toString()}&invoiceNumber=${payment.invoiceNumber}`;
 
     const webhookUrl = `${backendBase}/api/billing/gateways/zinipay/webhook`;
 
-    const payload = {
-      amount: payment.amount,
-      invoiceNumber: payment.invoiceNumber,
+    console.log("🚀 [ZiniPay Payment Initiated]", {
       workspaceId,
-      planCode,
       userId,
-      userName: req.user?.name,
-      userEmail: req.user?.email,
+      planCode,
+      amount: payment.amount,
+      paymentId: payment._id.toString(),
+      invoiceNumber: payment.invoiceNumber,
       redirectUrl,
-      cancelUrl,
       webhookUrl,
-    };
-
-    // console.log(payload, payment);
+    });
 
     // 3. Create checkout session on ZiniPay API
     const session = await zinipayGatewayService.createPaymentSession({
@@ -99,6 +95,11 @@ export async function initiateZinipayPaymentController(
       zinipayPaymentUrl: session.paymentUrl,
     };
     await payment.save();
+
+    console.log("🔗 [ZiniPay Checkout Session Ready]", {
+      zinipayInvoiceId: session.invoiceId,
+      paymentUrl: session.paymentUrl,
+    });
 
     res.status(200).json({
       success: true,
@@ -147,6 +148,15 @@ export async function zinipayCallbackController(
     .toString()
     .toLowerCase();
 
+  console.log("📥 [ZiniPay Callback/Webhook Hit]", {
+    method: req.method,
+    isWebhookOrJson,
+    query: req.query,
+    body: req.body,
+    invoiceId,
+    rawStatus,
+  });
+
   try {
     // 1. Explicit cancellation or rejection from user redirect query
     if (rawStatus === "cancel" || rawStatus === "cancelled") {
@@ -169,7 +179,7 @@ export async function zinipayCallbackController(
           .json({ success: true, message: "Payment was marked cancelled" });
         return;
       }
-      res.redirect(`${frontendUrl}/billing?payment_status=cancelled`);
+      res.redirect(`${frontendUrl}/billing/callback?payment_status=cancelled`);
       return;
     }
 
@@ -198,7 +208,7 @@ export async function zinipayCallbackController(
           .json({ success: true, message: "Payment was marked failed" });
         return;
       }
-      res.redirect(`${frontendUrl}/billing?payment_status=failed`);
+      res.redirect(`${frontendUrl}/billing/callback?payment_status=failed`);
       return;
     }
 
@@ -210,13 +220,14 @@ export async function zinipayCallbackController(
         return;
       }
       res.redirect(
-        `${frontendUrl}/billing?payment_status=failed&reason=missing_invoice_id`,
+        `${frontendUrl}/billing/callback?payment_status=failed&reason=missing_invoice_id`,
       );
       return;
     }
 
     // 2. Cryptographic / Server-to-Server Verification with ZiniPay API
     const verified = await zinipayGatewayService.verifyPayment(invoiceId);
+    console.log("✅ [ZiniPay Gateway Verified Response]", verified);
 
     // 3. Match Payment in database
     const payment = await Payment.findOne({
@@ -225,6 +236,13 @@ export async function zinipayCallbackController(
         { "gatewayData.paymentID": invoiceId },
         { invoiceNumber: verified.invoice_id || invoiceId },
       ],
+    });
+
+    console.log("🗄️ [Matched DB Payment Record]", {
+      found: Boolean(payment),
+      paymentId: payment?._id?.toString(),
+      invoiceNumber: payment?.invoiceNumber,
+      currentStatus: payment?.status,
     });
 
     if (!payment) {
@@ -236,7 +254,7 @@ export async function zinipayCallbackController(
         return;
       }
       res.redirect(
-        `${frontendUrl}/billing?payment_status=not_found&invoice_id=${invoiceId}`,
+        `${frontendUrl}/billing/callback?payment_status=not_found&invoice_id=${invoiceId}`,
       );
       return;
     }
@@ -244,7 +262,11 @@ export async function zinipayCallbackController(
     // 4. Handle COMPLETED
     if (verified.status === "COMPLETED") {
       if (payment.status === "COMPLETED") {
-        // Idempotent safeguard: already completed
+        console.log("ℹ️ [Payment Already Completed - Idempotent Return]", {
+          paymentId: payment._id.toString(),
+          invoiceNumber: payment.invoiceNumber,
+        });
+
         if (isWebhookOrJson) {
           res
             .status(200)
@@ -252,13 +274,13 @@ export async function zinipayCallbackController(
           return;
         }
         res.redirect(
-          `${frontendUrl}/billing?payment_status=success&invoice=${payment.invoiceNumber}`,
+          `${frontendUrl}/billing/callback?paymentId=${payment._id.toString()}&invoiceNumber=${payment.invoiceNumber}`,
         );
         return;
       }
 
       // Execute atomic completion (extends Subscription, activates Workspace, sets User.isPaid=true)
-      await billingService.completePaymentAtomic({
+      const atomicResult = await billingService.completePaymentAtomic({
         paymentId: payment._id,
         completionData: {
           trxID: verified.transaction_id,
@@ -272,6 +294,12 @@ export async function zinipayCallbackController(
         notes: `ZiniPay automated payment verified. TrxID: ${verified.transaction_id || "N/A"}, MFS: ${verified.payment_method || "Online"}`,
       });
 
+      console.log("🎉 [Atomic DB Update Completed]", {
+        paymentId: payment._id.toString(),
+        invoiceNumber: payment.invoiceNumber,
+        atomicResult,
+      });
+
       if (isWebhookOrJson) {
         res.status(200).json({
           success: true,
@@ -280,13 +308,18 @@ export async function zinipayCallbackController(
         return;
       }
       res.redirect(
-        `${frontendUrl}/billing?payment_status=success&invoice=${payment.invoiceNumber}`,
+        `${frontendUrl}/billing/callback?paymentId=${payment._id.toString()}&invoiceNumber=${payment.invoiceNumber}`,
       );
       return;
     }
 
     // 5. Handle PENDING
     if (verified.status === "PENDING") {
+      console.log("⏳ [ZiniPay Verification Pending]", {
+        paymentId: payment._id.toString(),
+        invoiceNumber: payment.invoiceNumber,
+      });
+
       if (isWebhookOrJson) {
         res
           .status(200)
@@ -294,7 +327,7 @@ export async function zinipayCallbackController(
         return;
       }
       res.redirect(
-        `${frontendUrl}/billing?payment_status=pending&invoice=${payment.invoiceNumber}`,
+        `${frontendUrl}/billing/callback?paymentId=${payment._id.toString()}&invoiceNumber=${payment.invoiceNumber}`,
       );
       return;
     }
@@ -312,6 +345,11 @@ export async function zinipayCallbackController(
       },
     );
 
+    console.log("❌ [ZiniPay Verification Failed]", {
+      paymentId: payment._id.toString(),
+      reason: verified.message,
+    });
+
     if (isWebhookOrJson) {
       res
         .status(400)
@@ -319,7 +357,7 @@ export async function zinipayCallbackController(
       return;
     }
     res.redirect(
-      `${frontendUrl}/billing?payment_status=failed&reason=verification_failed`,
+      `${frontendUrl}/billing/callback?paymentId=${payment._id.toString()}&invoiceNumber=${payment.invoiceNumber}`,
     );
   } catch (err: any) {
     console.error("[ZiniPay Callback/Webhook Error]", err);
@@ -331,6 +369,6 @@ export async function zinipayCallbackController(
       });
       return;
     }
-    res.redirect(`${frontendUrl}/billing?payment_status=error`);
+    res.redirect(`${frontendUrl}/billing/callback?payment_status=error`);
   }
 }

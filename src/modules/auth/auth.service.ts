@@ -12,12 +12,14 @@ import type {
 } from "./auth.validation.js";
 import { generateAccessToken } from "../../utils/jwt.js";
 import { sendEmail } from "../../services/mail.service.js";
+import Workspace from "../workspace/workspace.model.js";
 
 export class AuthError extends Error {
   constructor(
     message: string,
     public readonly statusCode: number,
-    public readonly code?: string, // ফ্রন্টএন্ডে স্পেসিফিক অ্যাকশন নেওয়ার জন্য কোড (যেমন: SUBSCRIPTION_EXPIRED)
+    public readonly code?: string, // ফ্রন্টএন্ডে স্পেসিফিক অ্যাকশন নেওয়ার জন্য কোড (যেমন: SUBSCRIPTION_EXPIRED)
+    public readonly data?: Record<string, unknown>, // অতিরিক্ত পেলোড (যেমন: token, user, workspaces)
   ) {
     super(message);
     this.name = "AuthError";
@@ -207,7 +209,7 @@ export const resendRegistrationOtp = async (input: ResendOtpInput) => {
   };
 };
 
-// ধাপ ৪: লগইন এবং ৭ দিন পার হলে সাবস্ক্রিপশন ব্লক চেক
+// ধাপ ৪: লগইন এবং ৭ দিন পার হলে সাবস্ক্রিপশন চেক
 export const loginUser = async (input: LoginInput) => {
   const user = await User.findOne({ email: input.email }).select("+password");
   if (!user) {
@@ -223,11 +225,6 @@ export const loginUser = async (input: LoginInput) => {
     throw new AuthError("This account is suspended or inactive.", 403);
   }
 
-  // const isPasswordValid = await comparePassword(input.password, user.password);
-  if (!isPasswordValid) {
-    throw new AuthError("Invalid email or password", 401);
-  }
-
   // ইমেইল ভেরিফাইড কি না চেক
   if (!user.isEmailVerified) {
     throw new AuthError(
@@ -237,21 +234,59 @@ export const loginUser = async (input: LoginInput) => {
     );
   }
 
-  // ৭ দিনের ফ্রি ট্রায়াল চেক: পেইড না হলে এবং ট্রায়ালের মেয়াদ শেষ হলে ব্লক
-  const now = new Date();
-  const trialExpired = user.trialEndDate && now > new Date(user.trialEndDate);
+  const userPayload = {
+    id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    platformRole: user.platformRole,
+    isEmailVerified: user.isEmailVerified,
+    subscriptionStatus: user.subscriptionStatus,
+    trialStartDate: user.trialStartDate,
+    trialEndDate: user.trialEndDate,
+    isPaid: user.isPaid,
+  };
 
-  if (!user.isPaid && (trialExpired || user.subscriptionStatus === "expired")) {
-    // ডাটাবেসে স্ট্যাটাস সিঙ্ক
+  const isPlatformAdmin =
+    user.platformRole === "SUPER_ADMIN" ||
+    user.platformRole === "FINANCE_ADMIN" ||
+    user.role === "ADMIN"
+
+  // ৭ দিনের ফ্রি ট্রায়াল চেক: পেইড না হলে এবং ট্রায়ালের মেয়াদ শেষ হলে আপগ্রেড ফ্লোতে পাঠানো
+  const now = new Date();
+  const trialExpired = Boolean(
+    user.trialEndDate && now > new Date(user.trialEndDate),
+  );
+
+  if (!isPlatformAdmin && !user.isPaid && (trialExpired || user.subscriptionStatus === "expired")) {
     if (user.subscriptionStatus !== "expired") {
       user.subscriptionStatus = "expired";
+      userPayload.subscriptionStatus = "expired";
       await user.save();
     }
+
+    // /upgrade পেজ থেকে সরাসরি /api/workspaces/:workspaceId/billing/pay/zinipay কল করার জন্য টোকেন ও ওয়ার্কস্পেস তথ্য
+    const upgradeToken = generateAccessToken(user._id.toString());
+    const workspaces = await Workspace.find({ ownerId: user._id })
+      .select("_id name status")
+      .lean();
 
     throw new AuthError(
       "Your 7-day free trial has expired. Please subscribe to a plan to continue using VexChat.",
       403,
-      "SUBSCRIPTION_EXPIRED", // ফ্রন্টএন্ড এই কোড দেখে প্রাইসিং পেজে পাঠাবে
+      "SUBSCRIPTION_EXPIRED",
+      {
+        trialExpired: true,
+        accessToken: upgradeToken,
+        tokenType: "Bearer",
+        expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "7d",
+        user: userPayload,
+        workspaces: workspaces.map((ws) => ({
+          id: ws._id.toString(),
+          name: ws.name,
+          status: ws.status,
+        })),
+      },
     );
   }
 
@@ -261,18 +296,7 @@ export const loginUser = async (input: LoginInput) => {
     accessToken,
     tokenType: "Bearer",
     expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "7d",
-    user: {
-      id: user._id.toString(),
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      platformRole: user.platformRole,
-      isEmailVerified: user.isEmailVerified,
-      subscriptionStatus: user.subscriptionStatus,
-      trialStartDate: user.trialStartDate,
-      trialEndDate: user.trialEndDate,
-      isPaid: user.isPaid,
-    },
+    user: userPayload,
   };
 };
 

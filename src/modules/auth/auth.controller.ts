@@ -195,7 +195,8 @@ export const loginController = async (
       res.status(error.statusCode).json({
         success: false,
         message: error.message,
-        code: error.code, // SUBSCRIPTION_EXPIRED আসলে ফ্রন্টএন্ড /pricing এ রিডাইরেক্ট করবে
+        code: error.code, // SUBSCRIPTION_EXPIRED আসলে ফ্রন্টএন্ড /upgrade এ রিডাইরেক্ট করবে
+        ...(error.data || {}),
       });
       return;
     }

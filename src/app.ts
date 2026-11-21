@@ -49,6 +49,7 @@ import {
 import { authenticate } from "./middlewares/authenticate.js";
 import { requireWorkspaceMembership } from "./middlewares/require-workspace-membership.js";
 import { requireRole } from "./middlewares/require-role.js";
+import { requireActiveSubscription } from "./middlewares/require-active-subscription.js";
 import automationRoutes from "./router/automation.routes.js";
 import bikashRouter from "./modules/billing/gateways/bikash.router.js";
 import { zinipayPublicRouter } from "./modules/billing/gateways/zinipay.routes.js";
@@ -162,28 +163,31 @@ app.use("/api/auth", authRouter);
 app.use("/api/settings", settingRouter);
 
 // ========================================================
-// 3. Other APIs
+// 3. Other APIs (Trial expiry guard applied on active feature routes)
 // ========================================================
-app.use("/api", callingRoutes);
 app.use("/api", internalCronRouter);
+app.use("/api", authenticate, requireActiveSubscription, callingRoutes);
 
-// Workspace and billing.
+// Workspace and billing (kept accessible so expired trial users can upgrade).
 app.use("/api/workspaces", workspaceRouter);
 
 // WhatsApp Media Streaming Proxy Routes (Direct and Workspace-scoped)
 app.get(
   "/api/whatsapp/media/:mediaId",
   authenticate,
+  requireActiveSubscription,
   getWhatsAppMediaStreamController,
 );
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/media/:mediaId",
   authenticate,
+  requireActiveSubscription,
   getWhatsAppMediaStreamController,
 );
 app.post(
   "/api/workspaces/:workspaceId/whatsapp/messages/media",
   authenticate,
+  requireActiveSubscription,
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   sendWhatsAppMediaMessageController,
@@ -193,6 +197,7 @@ app.post(
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/templates",
   authenticate,
+  requireActiveSubscription,
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   listTemplatesController,
@@ -200,6 +205,7 @@ app.get(
 app.post(
   "/api/workspaces/:workspaceId/whatsapp/templates/sync",
   authenticate,
+  requireActiveSubscription,
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   syncTemplatesController,
@@ -207,12 +213,19 @@ app.post(
 app.get(
   "/api/workspaces/:workspaceId/whatsapp/templates/:templateId",
   authenticate,
+  requireActiveSubscription,
   requireWorkspaceMembership,
   requireRole("OWNER", "ADMIN", "AGENT"),
   getTemplateByIdController,
 );
+
 // Register router with workspace prefix
-app.use("/api/workspaces/:workspaceId/automations", automationRoutes);
+app.use(
+  "/api/workspaces/:workspaceId/automations",
+  authenticate,
+  requireActiveSubscription,
+  automationRoutes,
+);
 
 app.use("/api/workspaces/:workspaceId/billing", workspaceBillingRouter);
 app.use("/api/billing/:workspaceId", workspaceBillingRouter);
@@ -242,7 +255,12 @@ app.use("/api/invitations", invitationRouter);
 
 // Other application modules.
 app.use("/api/dashboard", dashboardRoutes);
-app.use("/api/campaigns", campaignRoutes);
+app.use(
+  "/api/campaigns",
+  authenticate,
+  requireActiveSubscription,
+  campaignRoutes,
+);
 
 // Root health & status endpoints
 app.get("/", (_req, res) => {
